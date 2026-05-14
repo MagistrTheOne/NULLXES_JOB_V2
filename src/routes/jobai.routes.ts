@@ -64,6 +64,7 @@ function normalizePromptPayload(payload: unknown): {
 export function createJobAiRouter(service: InterviewSyncService, jobAiClient: JobAiClient): express.Router {
   const router = express.Router();
 
+  /** Партнёрский контракт JobAI: путь и форма тела не меняются без согласования (отдельно от REST meetings/start на NULLXES). */
   router.post("/webhooks/jobai/interviews", asyncHandler(async (req: Request, res: Response) => {
     assertIngestSecret(req);
     const stored = await service.ingestWebhook(req.body);
@@ -87,6 +88,7 @@ export function createJobAiRouter(service: InterviewSyncService, jobAiClient: Jo
    * Prompt snapshot webhook for JobAI side.
    * Security: same ingest secret contract as interview create/update webhook.
    */
+  /** Партнёрский контракт JobAI (тот же префикс `/webhooks/jobai/*`, что и interviews). */
   router.post("/webhooks/jobai/prompt/current", asyncHandler(async (req: Request, res: Response) => {
     assertIngestSecret(req);
 

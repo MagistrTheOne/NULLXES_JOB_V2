@@ -7,11 +7,12 @@
 - **П.1 (прокси)** и **п.2 (ИИ-бэкенд)** в первой итерации реализуются **в одном процессе `realtime-gateway`**, чтобы фронт мог вызывать те же пути через Next ` /api/gateway/*` без отдельного микросервиса.
 - Вынесение п.2 на отдельный хост включается переменными **`JOBAI_AI_AGENT_API_BASE_URL`** + **`JOBAI_AI_AGENT_API_TOKEN`**: gateway проксирует `POST /meetings/start` и `POST /meetings/stop` на этот базовый URL с тем же телом и `Authorization: Bearer <meetingControlKey>` где это требует ЧТЗ.
 
-## LiveKit
+## LiveKit и ingress
 
-- **Создание и удаление комнаты** выполняет gateway через `RoomServiceClient` (LiveKit Cloud).
-- Имя комнаты: **`nullxes-meeting-<numericMeetingId>`** (совпадает с внутренним `meetingId` оркестратора после старта).
-- **JWT участника** по-прежнему выдаётся `POST /livekit/token` (или клиент использует данные из `liveKitResponse.serverUrl` + отдельный запрос токена).
+- **Комната LiveKit и ingress** создаётся и сопровождается **контуром JobAI/LiveKit** (в т.ч. цель для ffmpeg). Gateway **не** вызывает LiveKit Room API (`createRoom` / `deleteRoom`).
+- Имя комнаты для участника и JWT: **`nullxes-meeting-<numericMeetingId>`** (совпадает с внутренним `meetingId` оркестратора после старта).
+- **JWT участника** выдаётся `POST /livekit/token` (или клиент использует `liveKitResponse.serverUrl` из `get-interview-livekit-data` + запрос токена).
+- В **`liveKitResponse.ingress`** gateway пробрасывает строковые поля из тела интервью, пришедшего по webhook (см. `pickLiveKitIngressHintsFromInterview` — ключи не переименовываются).
 
 ## WebSocket п.2.4 (control)
 

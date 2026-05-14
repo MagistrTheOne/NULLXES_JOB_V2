@@ -1,6 +1,4 @@
 import { logger } from "../logging/logger";
-import { deleteLiveKitRoom } from "./liveKitRoomAdmin";
-import { liveKitRoomNameForNumericMeetingId } from "./interviewInviteResponse";
 import { forwardAiAgentMeetingStopWithRetries, type AiAgentStopReason } from "./jobAiAiAgentForwarder";
 import type { MeetingOrchestrator } from "./meetingOrchestrator";
 import type { InterviewSyncService } from "./interviewSyncService";
@@ -82,7 +80,7 @@ export function createMeetingDeinitRunner(deps: MeetingDeinitRunnerDeps): {
         }
       }
 
-      await deleteLiveKitRoom(liveKitRoomNameForNumericMeetingId(numericMeetingId));
+      // Закрытие комнаты LiveKit / ingress — зона ответственности контура JobAI; gateway не вызывает LiveKit API.
 
       deps.controlWsHub?.closeMeeting(numericMeetingId, "meeting_stopped");
       void deps.runtimeEvents

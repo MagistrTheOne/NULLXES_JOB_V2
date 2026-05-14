@@ -49,6 +49,13 @@ export interface JobAiInterview {
   specialty?: JobAiSpecialty;
   greetingSpeech?: string;
   finalSpeech?: string;
+  /** Контур JobAI/LiveKit: цели для ffmpeg → ingress (имена полей — контракт партнёра, webhook). */
+  agentRTMPURL?: string | null;
+  livekitIngressRtmpUrl?: string | null;
+  livekitIngressStreamKey?: string | null;
+  livekitRtmpUrl?: string | null;
+  ingressUrl?: string | null;
+  liveKitIngressUrl?: string | null;
 }
 
 /** Ввод ФИО из прототипа UI: хранится отдельно от webhook/raw JobAI (1:1 raw не трогаем). */

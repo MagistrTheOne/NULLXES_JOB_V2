@@ -54,3 +54,29 @@ export function deriveLiveKitHttpHost(): string | undefined {
     return undefined;
   }
 }
+
+/**
+ * Поля для ffmpeg / LiveKit **ingress** приходят с контуром JobAI (webhook → raw interview).
+ * Gateway **не** вызывает LiveKit Room/Ingress API — только отдаёт их клиенту вместе с JWT-путём.
+ * Имена ключей не меняем: это контракт партнёра.
+ */
+const LIVEKIT_INGRESS_PASSTHROUGH_KEYS = [
+  "agentRTMPURL",
+  "livekitIngressRtmpUrl",
+  "livekitIngressStreamKey",
+  "livekitRtmpUrl",
+  "ingressUrl",
+  "liveKitIngressUrl"
+] as const;
+
+export function pickLiveKitIngressHintsFromInterview(raw: StoredInterview["rawPayload"]): Record<string, string> {
+  const r = raw as unknown as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const k of LIVEKIT_INGRESS_PASSTHROUGH_KEYS) {
+    const v = r[k];
+    if (typeof v === "string" && v.trim().length > 0) {
+      out[k] = v.trim();
+    }
+  }
+  return out;
+}

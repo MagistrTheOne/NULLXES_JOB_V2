@@ -1,10 +1,12 @@
 import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import { env } from "../config/env";
-import { logger } from "../logging/logger";
-import { buildInterviewGetByTokenPayload, liveKitRoomNameForNumericMeetingId } from "../services/interviewInviteResponse";
+import {
+  buildInterviewGetByTokenPayload,
+  liveKitRoomNameForNumericMeetingId,
+  pickLiveKitIngressHintsFromInterview
+} from "../services/interviewInviteResponse";
 import { InviteLivekitResponseCache } from "../services/inviteLivekitCache";
-import { ensureLiveKitRoom } from "../services/liveKitRoomAdmin";
 import type { InterviewSyncService } from "../services/interviewSyncService";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
 import type { JobAiInterviewStatus, StoredInterview } from "../types/interview";
@@ -95,29 +97,25 @@ export function createJobaiWebrtcProxyRouter(deps: JobaiWebrtcProxyRouterDeps): 
       const meetingId = resolved.interview.projection.meetingId;
       const roomName = liveKitRoomNameForNumericMeetingId(meetingId);
 
+      const ingressFromPartner = pickLiveKitIngressHintsFromInterview(resolved.interview.rawPayload);
       let liveKitResponse: Record<string, unknown>;
       if (!env.LIVEKIT_URL?.trim()) {
         liveKitResponse = {
           configured: false,
           roomName,
-          message: "LIVEKIT_URL is not configured"
+          message: "LIVEKIT_URL is not configured",
+          ...(Object.keys(ingressFromPartner).length > 0 ? { ingress: ingressFromPartner } : {})
         };
       } else {
-        try {
-          const { created } = await ensureLiveKitRoom(roomName);
-          liveKitResponse = {
-            configured: true,
-            roomName,
-            serverUrl: env.LIVEKIT_URL,
-            roomCreated: created,
-            tokenPath: "/livekit/token",
-            controlWebSocketPath: `/ws/meeting/${meetingId}`
-          };
-        } catch (err: unknown) {
-          logger.warn({ err, roomName }, "ensureLiveKitRoom failed");
-          respondError(res, 503, "livekit_room_unavailable");
-          return;
-        }
+        // Комната и ingress создаётся контуром JobAI/LiveKit; gateway не вызывает LiveKit Room API.
+        liveKitResponse = {
+          configured: true,
+          roomName,
+          serverUrl: env.LIVEKIT_URL,
+          tokenPath: "/livekit/token",
+          controlWebSocketPath: `/ws/meeting/${meetingId}`,
+          ...(Object.keys(ingressFromPartner).length > 0 ? { ingress: ingressFromPartner } : {})
+        };
       }
 
       const out = { ...basePayload, liveKitResponse };
