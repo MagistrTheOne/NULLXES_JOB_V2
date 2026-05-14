@@ -4,6 +4,7 @@ import { AccessToken } from "livekit-server-sdk";
 import { env } from "../config/env";
 import { HttpError } from "../middleware/errorHandler";
 import type { InMemoryMeetingStore } from "../services/meetingStore";
+import type { InterviewSyncService } from "../services/interviewSyncService";
 
 const tokenSchema = z.object({
   meetingId: z.string().min(1),
@@ -23,7 +24,10 @@ function asyncHandler(
   };
 }
 
-export function createLiveKitRouter(deps: { meetingStore: InMemoryMeetingStore }): express.Router {
+export function createLiveKitRouter(deps: {
+  meetingStore: InMemoryMeetingStore;
+  interviews?: InterviewSyncService;
+}): express.Router {
   const router = express.Router();
 
   router.post(
@@ -38,7 +42,13 @@ export function createLiveKitRouter(deps: { meetingStore: InMemoryMeetingStore }
       }
       const input = parsed.data;
       const meeting = deps.meetingStore.getMeeting(input.meetingId);
-      if (!meeting) {
+      const m = /^nullxes-meeting-(\d+)$/.exec(input.meetingId);
+      const numericId = m ? Number(m[1]) : NaN;
+      const interviewOk =
+        Number.isFinite(numericId) && numericId > 0 && deps.interviews
+          ? Boolean(deps.interviews.getInterviewByNumericMeetingId(numericId))
+          : false;
+      if (!meeting && !interviewOk) {
         throw new HttpError(404, `Meeting not found: ${input.meetingId}`);
       }
       const at = new AccessToken(env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET, {

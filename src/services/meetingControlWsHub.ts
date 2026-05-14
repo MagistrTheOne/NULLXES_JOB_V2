@@ -254,12 +254,22 @@ export class MeetingControlWsHub {
   }
 
   private isAuthorized(req: IncomingMessage, stored: StoredInterview): boolean {
+    const fromHeader = this.readBearerFromHeader(req);
+    if (fromHeader && fromHeader === stored.projection.meetingControlKey) {
+      return true;
+    }
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const q = url.searchParams.get("token") ?? url.searchParams.get("meetingControlKey");
+    return typeof q === "string" && q.trim() === stored.projection.meetingControlKey;
+  }
+
+  private readBearerFromHeader(req: IncomingMessage): string | undefined {
     const auth = req.headers.authorization;
     if (typeof auth !== "string") {
-      return false;
+      return undefined;
     }
     const bearer = /^Bearer\s+(.+)$/i.exec(auth.trim()) ?? /^Bearer:\s*(.+)$/i.exec(auth.trim());
-    return bearer?.[1]?.trim() === stored.projection.meetingControlKey;
+    return bearer?.[1]?.trim();
   }
 
   private isTerminal(stored: StoredInterview): boolean {

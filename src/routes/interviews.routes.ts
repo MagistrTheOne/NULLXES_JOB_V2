@@ -3,6 +3,7 @@ import { z } from "zod";
 import { env } from "../config/env";
 import { HttpError } from "../middleware/errorHandler";
 import { serializeInterviewDetail, serializeInterviewListItem } from "../services/interviewSerialization";
+import { buildInterviewGetByTokenPayload } from "../services/interviewInviteResponse";
 import { InterviewSyncService } from "../services/interviewSyncService";
 import type { JobAiInterviewStatus, StoredInterview } from "../types/interview";
 
@@ -84,23 +85,6 @@ function isFinishedInterview(stored: StoredInterview): boolean {
   );
 }
 
-function questionsCount(stored: StoredInterview): number | null {
-  const questions = stored.rawPayload.specialty?.questions;
-  return Array.isArray(questions) ? questions.length : null;
-}
-
-function nullableText(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
-}
-
-function aiWsUrl(meetingId: number): string {
-  const template = env.NULLXES_AI_WS_URL_TEMPLATE?.trim();
-  if (template) {
-    return template.replace(/\{meetingId\}/g, String(meetingId));
-  }
-  return env.NULLXES_AI_WS_URL;
-}
-
 export function createInterviewsRouter(service: InterviewSyncService): express.Router {
   const router = express.Router();
 
@@ -149,20 +133,7 @@ export function createInterviewsRouter(service: InterviewSyncService): express.R
     }
 
     const { interview, role } = resolved;
-    res.status(200).json({
-      role,
-      candidate: {
-        firstName: interview.projection.candidateFirstName,
-        lastName: interview.projection.candidateLastName,
-        patronymic: null
-      },
-      meetingAt: interview.projection.meetingAt,
-      aiWSURL: aiWsUrl(interview.projection.meetingId),
-      companyName: nullableText(interview.rawPayload.companyName),
-      questionsCount: questionsCount(interview),
-      meetingId: interview.projection.meetingId,
-      meetingControlKey: interview.projection.meetingControlKey
-    });
+    res.status(200).json(buildInterviewGetByTokenPayload(interview, role));
   });
 
   router.get("/:id", asyncHandler(async (req: Request, res: Response) => {

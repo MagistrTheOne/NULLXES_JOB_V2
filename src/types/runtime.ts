@@ -16,6 +16,7 @@ export type RuntimeEventType =
   | "meeting.control.activity_mode_changed"
   | "meeting.control.current_question_changed"
   | "meeting.control.subtitles_delta"
+  | "meeting.control.deinit_completed"
   | "avatar.runtime.started"
   | "avatar.runtime.stopped"
   | "avatar.runtime.degraded"

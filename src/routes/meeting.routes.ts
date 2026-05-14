@@ -10,6 +10,8 @@ import { StreamRecordingStateError, type StreamRecordingService } from "../servi
 import type { RuntimeEventStore } from "../services/runtimeEventStore";
 import type { MeetingControlWsHub } from "../services/meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
+import { forwardAiAgentMeetingStart, RtmpReceiverNotReadyError } from "../services/jobAiAiAgentForwarder";
+import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
 import type { FailMeetingInput, MeetingRecord, StartMeetingInput, StopMeetingInput } from "../types/meeting";
 import type { JobAiInterviewStatus, StoredInterview } from "../types/interview";
 
@@ -197,6 +199,7 @@ export function createMeetingRouter(
     runtimeEvents?: RuntimeEventStore;
     controlWsHub?: MeetingControlWsHub;
     avatarRuntime?: AvatarRuntimeSessionManager;
+    presence?: MeetingCandidatePresenceTracker;
   }
 ): express.Router {
   const router = express.Router();
@@ -262,7 +265,12 @@ export function createMeetingRouter(
       const internalId = internalMeetingId(input.meetingId);
       const existingMeeting = orchestrator.tryGetMeeting(internalId);
       if (existingMeeting && !isFinishedMeeting(existingMeeting)) {
-        respondError(res, 400, "meeting_already_started");
+        res.status(200).json({
+          state: "meeting_already_started" as const,
+          meetingId: internalId,
+          numericMeetingId: input.meetingId,
+          status: existingMeeting.status
+        });
         return;
       }
       if (isFinishedMeeting(existingMeeting)) {
@@ -287,11 +295,40 @@ export function createMeetingRouter(
         metadata.agentRTMPURL = rtmp;
       }
 
+      let agentReceiverRTMPURL: string | undefined;
+      if (env.JOBAI_AI_AGENT_API_BASE_URL?.trim()) {
+        if (!rtmp) {
+          respondError(res, 400, "rtmp_receiver_not_ready");
+          return;
+        }
+        try {
+          const out = await forwardAiAgentMeetingStart({
+            meetingId: input.meetingId,
+            meetingControlKey: stored.projection.meetingControlKey,
+            agentRTMPURL: rtmp
+          });
+          agentReceiverRTMPURL = out.agentReceiverRTMPURL;
+          metadata.agentReceiverRTMPURL = agentReceiverRTMPURL;
+        } catch (err: unknown) {
+          if (err instanceof RtmpReceiverNotReadyError) {
+            respondError(res, 400, "rtmp_receiver_not_ready");
+            return;
+          }
+          logger.warn(
+            { err, meetingId: input.meetingId, error: err instanceof Error ? err.message : String(err) },
+            "ai agent forward meetings/start failed"
+          );
+          respondError(res, 400, "rtmp_receiver_not_ready");
+          return;
+        }
+      }
+
       const result = orchestrator.startMeeting({
         meetingId: internalId,
         triggerSource: "nullxes_control_api",
         metadata
       });
+      deps.presence?.markSessionStarted(input.meetingId);
       void deps.avatarRuntime?.startForMeeting({
         meetingId: internalId,
         numericMeetingId: input.meetingId,
@@ -319,14 +356,16 @@ export function createMeetingRouter(
         actor: "nullxes_control_api",
         payload: {
           numericMeetingId: input.meetingId,
-          ...(rtmp.length > 0 ? { agentRTMPURL: rtmp } : {})
+          ...(rtmp.length > 0 ? { agentRTMPURL: rtmp } : {}),
+          ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {})
         }
       }).catch(() => undefined);
-      res.status(201).json({
-        ok: true,
+      res.status(200).json({
+        state: "meeting_started" as const,
         meetingId: internalId,
         numericMeetingId: input.meetingId,
-        status: result.meeting.status
+        status: result.meeting.status,
+        ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {})
       });
       return;
     }

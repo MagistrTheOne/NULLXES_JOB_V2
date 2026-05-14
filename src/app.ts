@@ -22,6 +22,7 @@ import {
   createJoinPublicRouter
 } from "./routes/joinLinks.routes";
 import { createTzAliasRouter } from "./routes/tzAlias.routes";
+import { createJobaiWebrtcProxyRouter } from "./routes/jobaiWebrtcProxy.routes";
 import { createMeetingRouter } from "./routes/meeting.routes";
 import { createRealtimeRouter } from "./routes/realtime.routes";
 import { createOrchestratedRealtimeRouter } from "./routes/orchestratedRealtime.routes";
@@ -33,6 +34,9 @@ import { PersistedAvatarStateStore } from "./services/persistedAvatarStateStore"
 import { StreamProvisioner } from "./services/streamProvisioner";
 import { StreamRecordingService } from "./services/streamRecordingService";
 import { InterviewSyncService } from "./services/interviewSyncService";
+import { InviteLivekitResponseCache } from "./services/inviteLivekitCache";
+import { MeetingCandidatePresenceTracker } from "./services/meetingCandidatePresence";
+import { createMeetingDeinitRunner } from "./services/meetingDeinitRunner";
 import { JobAiClient } from "./services/jobaiClient";
 import { JoinTokenSigner } from "./services/joinTokenSigner";
 import {
@@ -179,6 +183,25 @@ export async function createApp(): Promise<AppContext> {
   meetingOrchestrator.setQuestionChangeHandler(({ meetingId, questionIndex }) => {
     avatarRuntimeSessionManager.publishCurrentQuestion(meetingId, questionIndex);
   });
+
+  const inviteLivekitCache = new InviteLivekitResponseCache();
+  const meetingPresenceTracker = new MeetingCandidatePresenceTracker();
+  const meetingDeinitRunner = createMeetingDeinitRunner({
+    orchestrator: meetingOrchestrator,
+    interviews: interviewService,
+    recordings: streamRecordingService,
+    controlWsHub: meetingControlWsHub,
+    avatarRuntime: avatarRuntimeSessionManager,
+    runtimeEvents,
+    onPresenceStopped: (id) => {
+      meetingPresenceTracker.markStopped(id);
+    }
+  });
+  meetingPresenceTracker.setAutoDeinitHandler((mid) => {
+    meetingDeinitRunner.scheduleDeinit(mid, "candidate_leaved");
+  });
+  meetingPresenceTracker.startSweeper();
+
   const runtimeSnapshots = new RuntimeSnapshotService({
     meetingStore,
     sessionStore,
@@ -279,6 +302,15 @@ export async function createApp(): Promise<AppContext> {
 
   // ---------------- routers ----------------
   app.use(
+    createJobaiWebrtcProxyRouter({
+      interviews: interviewService,
+      cache: inviteLivekitCache,
+      presence: meetingPresenceTracker,
+      scheduleDeinit: meetingDeinitRunner.scheduleDeinit
+    })
+  );
+
+  app.use(
     "/realtime",
     (req, res, next) => {
       // Применяем разные лимиты по подмаршрутам, не оборачивая весь роутер.
@@ -314,7 +346,8 @@ export async function createApp(): Promise<AppContext> {
       interviews: interviewService,
       runtimeEvents,
       controlWsHub: meetingControlWsHub,
-      avatarRuntime: avatarRuntimeSessionManager
+      avatarRuntime: avatarRuntimeSessionManager,
+      presence: meetingPresenceTracker
     })
   );
 
@@ -354,7 +387,7 @@ export async function createApp(): Promise<AppContext> {
 
   app.use("/interviews", createInterviewsRouter(interviewService));
   app.use("/api/v1", createTzAliasRouter(interviewService, jobAiClient));
-  app.use("/livekit", createLiveKitRouter({ meetingStore }));
+  app.use("/livekit", createLiveKitRouter({ meetingStore, interviews: interviewService }));
   app.use(
     "/runtime",
     createRuntimeRouter({

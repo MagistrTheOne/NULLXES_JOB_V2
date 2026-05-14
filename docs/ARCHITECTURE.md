@@ -92,6 +92,8 @@ flowchart TB
 | `/api/v1` | `tzAlias.routes` | Алиас под ожидаемый JobAI-путь (`questions/general` и др.). |
 | `/runtime` | `runtime.routes` | Снимок по `meetingId` / `jobAiId`, SSE/поллинг событий, команды runtime, stream binding. |
 | `/avatar` | `avatar.routes` | События от пода, health/state по `meetingId`. |
+| `/` (корень) | `jobaiWebrtcProxy.routes` | **ЧТЗ JobAI WebRTC V2:** `POST /get-interview-livekit-data`, `POST /deinit`, `POST /meeting/ping-status` (см. `docs/JOBAI-WEBRTC-V2-TOPOLOGY.md`). |
+| `/livekit` | `livekit.routes` | JWT для LiveKit; при отсутствии meeting в store допускается join, если есть интервью с тем же `nullxes-meeting-<id>`. |
 | `/` (корень) | `jobai.routes` | Webhooks и ingest от JobAI (`/webhooks/jobai/*`, `/jobai/sync`, …). |
 | `/ops/webhooks` | inline | Статистика очереди исходящих webhooks. |
 

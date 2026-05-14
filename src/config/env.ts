@@ -107,8 +107,22 @@ const envSchema = z.object({
   STREAM_CALL_TYPE: z.string().min(1).default("default"),
   // LiveKit (optional parallel SFU/agent transport)
   LIVEKIT_URL: z.string().min(1).optional(),
+  /** Optional override for RoomServiceClient host (https URL). If unset, derived from LIVEKIT_URL. */
+  LIVEKIT_HTTP_HOST: z.string().url().optional(),
   LIVEKIT_API_KEY: z.string().min(1).optional(),
   LIVEKIT_API_SECRET: z.string().min(1).optional(),
+  /** When set, ЧТЗ п.2.2/2.3 for meetings/start|stop are forwarded to this base URL with Bearer meetingControlKey. */
+  JOBAI_AI_AGENT_API_BASE_URL: z.string().url().optional(),
+  JOBAI_AI_AGENT_START_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  /** ЧТЗ п.4.1 — max time without client ping before auto-deinit (proxy). */
+  JOBAI_CANDIDATE_ABSENT_MS: z.coerce.number().int().positive().default(300_000),
+  /** ЧТЗ п.4.1 — max wall time for meeting session on proxy. */
+  JOBAI_MAX_MEETING_WALL_MS: z.coerce.number().int().positive().default(3_600_000),
+  JOBAI_DEINIT_AI_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(8),
+  JOBAI_DEINIT_AI_DELAY_MS: z.coerce.number().int().positive().default(30_000),
+  /** In-memory cache TTL for п.1.1 get-interview-livekit-data (inviteToken → 2.1 payload). */
+  JOBAI_INVITE_LK_CACHE_TTL_MS: z.coerce.number().int().positive().default(120_000),
+  JOBAI_LK_PRESENCE_SWEEP_MS: z.coerce.number().int().positive().default(30_000),
   // Post-processing artifacts (assistant audio capture + optional merge)
   ARTIFACTS_DIR: z.string().min(1).default("/var/lib/nullxes-hr/artifacts"),
   ASSISTANT_AUDIO_MAX_BYTES: z.coerce.number().int().positive().default(25_000_000)
