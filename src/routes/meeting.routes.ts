@@ -14,7 +14,7 @@ import { forwardAiAgentMeetingStart, RtmpReceiverNotReadyError } from "../servic
 import { rtmpSttBridge } from "../services/rtmpSttBridge";
 import { rtmpReceiverSessionManager } from "../services/rtmpReceiverSessionManager";
 import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
-import { rtmpTtsSessionManager } from "../services/rtmpTtsSessionManager";
+import { rtmpTtsSessionManager, truncateRtmpUrl } from "../services/rtmpTtsSessionManager";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
 import type { FailMeetingInput, MeetingRecord, StartMeetingInput, StopMeetingInput } from "../types/meeting";
 import type { JobAiInterviewStatus, StoredInterview } from "../types/interview";
@@ -195,6 +195,49 @@ function shouldRejectTooEarly(stored: StoredInterview, now = Date.now()): boolea
   return Number.isFinite(meetingAtMs) && now < meetingAtMs;
 }
 
+type AgentRtmpUrlSource =
+  | "body.agentRTMPURL"
+  | "rawPayload.agentRTMPURL"
+  | "rawPayload.livekitIngressRtmpUrl"
+  | "rawPayload.livekitRtmpUrl"
+  | "rawPayload.ingressUrl"
+  | "rawPayload.liveKitIngressUrl"
+  | "missing";
+
+function resolveAgentRtmpUrl(input: { agentRTMPURL?: string }, stored: StoredInterview): { url: string; source: AgentRtmpUrlSource } {
+  const fromBody = typeof input.agentRTMPURL === "string" ? input.agentRTMPURL.trim() : "";
+  if (fromBody) {
+    return { url: fromBody, source: "body.agentRTMPURL" };
+  }
+
+  const raw = stored.rawPayload;
+  const candidates: Array<{ source: AgentRtmpUrlSource; value?: string | null }> = [
+    { source: "rawPayload.agentRTMPURL", value: raw.agentRTMPURL },
+    { source: "rawPayload.livekitIngressRtmpUrl", value: raw.livekitIngressRtmpUrl },
+    { source: "rawPayload.livekitRtmpUrl", value: raw.livekitRtmpUrl },
+    { source: "rawPayload.ingressUrl", value: raw.ingressUrl },
+    { source: "rawPayload.liveKitIngressUrl", value: raw.liveKitIngressUrl }
+  ];
+  for (const candidate of candidates) {
+    const value = typeof candidate.value === "string" ? candidate.value.trim() : "";
+    if (value) {
+      return { url: value, source: candidate.source };
+    }
+  }
+
+  return { url: "", source: "missing" };
+}
+
+function rtmpIngressStatusFor(input: { rtmp: string; ttsActive?: boolean }): string {
+  if (!input.rtmp) {
+    return "missing_agent_rtmp_url";
+  }
+  if (!rtmpTtsSessionManager.isEnabled()) {
+    return "rtmp_ingress_disabled";
+  }
+  return input.ttsActive ? "publisher_spawned" : "publisher_not_started";
+}
+
 export function createMeetingRouter(
   orchestrator: MeetingOrchestrator,
   deps?: {
@@ -274,12 +317,22 @@ export function createMeetingRouter(
           (typeof existingMeeting.metadata?.agentReceiverRTMPURL === "string"
             ? existingMeeting.metadata.agentReceiverRTMPURL
             : undefined);
+        const existingIngressStatus =
+          typeof existingMeeting.metadata?.rtmpIngressStatus === "string"
+            ? existingMeeting.metadata.rtmpIngressStatus
+            : rtmpTtsSessionManager.isActive(input.meetingId)
+              ? "publisher_spawned"
+              : undefined;
+        const existingAgentRtmpUrlSource =
+          typeof existingMeeting.metadata?.agentRTMPURLSource === "string" ? existingMeeting.metadata.agentRTMPURLSource : undefined;
         res.status(200).json({
           state: "meeting_already_started" as const,
           meetingId: internalId,
           numericMeetingId: input.meetingId,
           status: existingMeeting.status,
-          ...(existingReceiverUrl ? { agentReceiverRTMPURL: existingReceiverUrl } : {})
+          ...(existingReceiverUrl ? { agentReceiverRTMPURL: existingReceiverUrl } : {}),
+          ...(existingIngressStatus ? { rtmpIngressStatus: existingIngressStatus } : {}),
+          ...(existingAgentRtmpUrlSource ? { agentRTMPURLSource: existingAgentRtmpUrlSource } : {})
         });
         return;
       }
@@ -300,10 +353,23 @@ export function createMeetingRouter(
           questions: stored.rawPayload.specialty?.questions ?? []
         }
       };
-      const rtmp = typeof input.agentRTMPURL === "string" ? input.agentRTMPURL.trim() : "";
+      const resolvedAgentRtmp = resolveAgentRtmpUrl(input, stored);
+      const rtmp = resolvedAgentRtmp.url;
+      metadata.agentRTMPURLSource = resolvedAgentRtmp.source;
+      metadata.rtmpIngressStatus = rtmpIngressStatusFor({ rtmp });
       if (rtmp.length > 0) {
         metadata.agentRTMPURL = rtmp;
       }
+      logger.info(
+        {
+          meetingId: input.meetingId,
+          jobAiId: stored.jobAiId,
+          agentRTMPURLSource: resolvedAgentRtmp.source,
+          hasAgentRTMPURL: rtmp.length > 0,
+          rtmp: rtmp.length > 0 ? truncateRtmpUrl(rtmp) : undefined
+        },
+        "control meeting start: resolved agent RTMP URL"
+      );
 
       let agentReceiverRTMPURL: string | undefined;
 
@@ -374,6 +440,7 @@ export function createMeetingRouter(
             rtmpUrl: rtmp
           });
           rtmpTtsAudioTap.register(internalId, input.meetingId);
+          metadata.rtmpIngressStatus = "publisher_spawned";
         } catch (err: unknown) {
           rtmpTtsAudioTap.unregister(internalId);
           await rtmpSttBridge.stop(input.meetingId);
@@ -386,6 +453,7 @@ export function createMeetingRouter(
               stopReason: "rtmp_publish_failed"
             }
           });
+          metadata.rtmpIngressStatus = "publisher_start_failed";
           logger.warn(
             { meetingId: input.meetingId, internalId, error: err instanceof Error ? err.message : String(err) },
             "rtmp tts start failed after meeting start — rolled back"
@@ -425,6 +493,8 @@ export function createMeetingRouter(
         actor: "nullxes_control_api",
         payload: {
           numericMeetingId: input.meetingId,
+          agentRTMPURLSource: resolvedAgentRtmp.source,
+          rtmpIngressStatus: metadata.rtmpIngressStatus,
           ...(rtmp.length > 0 ? { agentRTMPURL: rtmp } : {}),
           ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {})
         }
@@ -434,7 +504,9 @@ export function createMeetingRouter(
         meetingId: internalId,
         numericMeetingId: input.meetingId,
         status: result.meeting.status,
-        ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {})
+        ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {}),
+        agentRTMPURLSource: resolvedAgentRtmp.source,
+        rtmpIngressStatus: metadata.rtmpIngressStatus
       });
       return;
     }
@@ -559,6 +631,71 @@ export function createMeetingRouter(
     deps?.avatarRuntime?.stop(req.params.meetingId, input.reason);
     res.status(200).json(result);
   }));
+
+  router.get("/ops/rtmp/:meetingId", (req: Request, res: Response) => {
+    if (!deps?.interviews) {
+      res.status(503).json({ errorCode: "interview_sync_not_configured" });
+      return;
+    }
+    const numericMeetingId = Number(req.params.meetingId);
+    if (!Number.isSafeInteger(numericMeetingId) || numericMeetingId <= 0) {
+      res.status(400).json({ errorCode: "invalid_meeting_id" });
+      return;
+    }
+
+    const stored = deps.interviews.getInterviewByNumericMeetingId(numericMeetingId);
+    if (!stored) {
+      res.status(404).json({ errorCode: "meeting_not_found" });
+      return;
+    }
+
+    const internalId = internalMeetingId(numericMeetingId);
+    const meeting = orchestrator.tryGetMeeting(internalId);
+    const agentRtmp = resolveAgentRtmpUrl({}, stored);
+    const receiverUrl =
+      rtmpReceiverSessionManager.getAgentReceiverUrl(numericMeetingId) ??
+      (typeof meeting?.metadata?.agentReceiverRTMPURL === "string" ? meeting.metadata.agentReceiverRTMPURL : undefined);
+    const tts = rtmpTtsSessionManager.getSnapshot(numericMeetingId);
+
+    res.status(200).json({
+      meetingId: internalId,
+      numericMeetingId,
+      jobAiId: stored.jobAiId,
+      jobAiStatus: stored.rawPayload.status,
+      nullxesStatus: stored.projection.nullxesStatus,
+      meetingAt: stored.projection.meetingAt,
+      gatewayMeeting: meeting
+        ? {
+            status: meeting.status,
+            triggerSource: meeting.triggerSource,
+            metadata: {
+              rtmpIngressStatus: meeting.metadata?.rtmpIngressStatus,
+              agentRTMPURLSource: meeting.metadata?.agentRTMPURLSource,
+              hasAgentRTMPURL: typeof meeting.metadata?.agentRTMPURL === "string" && meeting.metadata.agentRTMPURL.length > 0,
+              hasAgentReceiverRTMPURL:
+                typeof meeting.metadata?.agentReceiverRTMPURL === "string" && meeting.metadata.agentReceiverRTMPURL.length > 0
+            }
+          }
+        : null,
+      rtmp: {
+        ingress: {
+          enabled: rtmpTtsSessionManager.isEnabled(),
+          status: tts.status,
+          active: tts.active,
+          agentRTMPURLSource: agentRtmp.source,
+          hasAgentRTMPURL: agentRtmp.url.length > 0,
+          agentRTMPURL: agentRtmp.url.length > 0 ? truncateRtmpUrl(agentRtmp.url) : null,
+          publisher: tts
+        },
+        receiver: {
+          enabled: rtmpSttBridge.isEnabled(),
+          active: Boolean(receiverUrl),
+          agentReceiverRTMPURL: receiverUrl ?? null
+        }
+      },
+      controlWsConnections: deps.controlWsHub?.getConnectionCount(numericMeetingId) ?? null
+    });
+  });
 
   router.get("/:meetingId", (req: Request, res: Response) => {
     const result = orchestrator.getMeeting(req.params.meetingId);
