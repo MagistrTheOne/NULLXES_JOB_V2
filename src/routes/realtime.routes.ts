@@ -5,6 +5,7 @@ import { logger } from "../logging/logger";
 import { HttpError } from "../middleware/errorHandler";
 import { OpenAIRealtimeClient } from "../services/openaiRealtimeClient";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
+import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
 import type { RuntimeEventStore } from "../services/runtimeEventStore";
 import { InMemorySessionStore } from "../services/sessionStore";
 import type { DataChannelEventPayload } from "../types/realtime";
@@ -232,14 +233,16 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
         : typeof normalized.meetingId === "string"
           ? normalized.meetingId
           : undefined;
-    deps.avatarRuntime?.handleRealtimeEvent({
+    const realtimeEvent = {
       meetingId,
       sessionId,
       type: event.type,
       rawPayload: event.rawPayload as Record<string, unknown>,
       normalizedPayload: event.normalizedPayload as Record<string, unknown>,
       timestampMs: typeof event.timestampMs === "number" ? event.timestampMs : undefined
-    });
+    };
+    deps.avatarRuntime?.handleRealtimeEvent(realtimeEvent);
+    rtmpTtsAudioTap.handleRealtimeEvent(realtimeEvent);
     void deps.runtimeEvents?.append({
       type: "realtime.session.event",
       meetingId,

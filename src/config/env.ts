@@ -141,6 +141,11 @@ const envSchema = z.object({
   VIDEO_MODEL: z.enum(["none", "behavior_static", "arachne", "arachne_ultra_avatar", "arachne_ultra_video"]).default("none"),
   AVATAR_VIDEO_ENABLED: envBoolean(true),
   AVATAR_VIDEO_DEGRADED_FALLBACK: z.enum(["static", "none"]).default("static"),
+  /** CHТЗ #3 — OpenAI Realtime assistant PCM → ffmpeg → RTMP (LiveKit ingress URL from POST /meetings/start). */
+  RTMP_INGRESS_ENABLED: envBoolean(true),
+  FFMPEG_PATH: z.string().min(1).default("ffmpeg"),
+  OPENAI_TTS_MODEL: z.string().default("gpt-4o-mini-tts"),
+  OPENAI_TTS_VOICE: z.string().optional(),
   AVATAR_AUDIO_CHUNK_TARGET_MS: z.coerce.number().int().min(20).max(40).default(20),
   AVATAR_AUDIO_CHUNK_MAX_MS: z.coerce.number().int().min(20).max(40).default(40),
   AVATAR_AUDIO_QUEUE_BUDGET_MS: z.coerce.number().int().min(80).max(2_000).default(200),

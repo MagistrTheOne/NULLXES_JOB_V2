@@ -5,6 +5,8 @@ import type { InterviewSyncService } from "./interviewSyncService";
 import type { StreamRecordingService } from "./streamRecordingService";
 import type { MeetingControlWsHub } from "./meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "./avatarRuntimeSessionManager";
+import { rtmpTtsAudioTap } from "./rtmpTtsAudioTap";
+import { rtmpTtsSessionManager } from "./rtmpTtsSessionManager";
 import type { RuntimeEventStore } from "./runtimeEventStore";
 
 const inFlight = new Set<number>();
@@ -69,6 +71,8 @@ export function createMeetingDeinitRunner(deps: MeetingDeinitRunnerDeps): {
           });
           void deps.interviews.transitionStatus(stored.jobAiId, "stopped_during_meeting").catch(() => undefined);
         }
+        rtmpTtsAudioTap.unregisterByNumeric(numericMeetingId);
+        await rtmpTtsSessionManager.stop(numericMeetingId);
         deps.avatarRuntime?.stop(internalId, stopReason);
       }
 
