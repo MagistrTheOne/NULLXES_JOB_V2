@@ -123,8 +123,6 @@ export class OpenAiRealtimeWsSttClient {
     this.sendJson({
       type: "session.update",
       session: {
-        type: "realtime",
-        model: env.OPENAI_STT_MODEL ?? env.OPENAI_REALTIME_MODEL,
         modalities: ["text"],
         input_audio_format: "pcm16",
         input_audio_transcription: {
