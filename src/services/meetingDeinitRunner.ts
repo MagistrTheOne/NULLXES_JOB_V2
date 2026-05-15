@@ -5,6 +5,7 @@ import type { InterviewSyncService } from "./interviewSyncService";
 import type { StreamRecordingService } from "./streamRecordingService";
 import type { MeetingControlWsHub } from "./meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "./avatarRuntimeSessionManager";
+import { rtmpSttBridge } from "./rtmpSttBridge";
 import { rtmpTtsAudioTap } from "./rtmpTtsAudioTap";
 import { rtmpTtsSessionManager } from "./rtmpTtsSessionManager";
 import type { RuntimeEventStore } from "./runtimeEventStore";
@@ -73,6 +74,7 @@ export function createMeetingDeinitRunner(deps: MeetingDeinitRunnerDeps): {
         }
         rtmpTtsAudioTap.unregisterByNumeric(numericMeetingId);
         await rtmpTtsSessionManager.stop(numericMeetingId);
+        await rtmpSttBridge.stop(numericMeetingId);
         deps.avatarRuntime?.stop(internalId, stopReason);
       }
 

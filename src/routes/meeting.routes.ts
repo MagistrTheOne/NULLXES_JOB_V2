@@ -11,6 +11,8 @@ import type { RuntimeEventStore } from "../services/runtimeEventStore";
 import type { MeetingControlWsHub } from "../services/meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
 import { forwardAiAgentMeetingStart, RtmpReceiverNotReadyError } from "../services/jobAiAiAgentForwarder";
+import { rtmpSttBridge } from "../services/rtmpSttBridge";
+import { rtmpReceiverSessionManager } from "../services/rtmpReceiverSessionManager";
 import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
 import { rtmpTtsSessionManager } from "../services/rtmpTtsSessionManager";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
@@ -267,11 +269,17 @@ export function createMeetingRouter(
       const internalId = internalMeetingId(input.meetingId);
       const existingMeeting = orchestrator.tryGetMeeting(internalId);
       if (existingMeeting && !isFinishedMeeting(existingMeeting)) {
+        const existingReceiverUrl =
+          rtmpReceiverSessionManager.getAgentReceiverUrl(input.meetingId) ??
+          (typeof existingMeeting.metadata?.agentReceiverRTMPURL === "string"
+            ? existingMeeting.metadata.agentReceiverRTMPURL
+            : undefined);
         res.status(200).json({
           state: "meeting_already_started" as const,
           meetingId: internalId,
           numericMeetingId: input.meetingId,
-          status: existingMeeting.status
+          status: existingMeeting.status,
+          ...(existingReceiverUrl ? { agentReceiverRTMPURL: existingReceiverUrl } : {})
         });
         return;
       }
@@ -298,7 +306,26 @@ export function createMeetingRouter(
       }
 
       let agentReceiverRTMPURL: string | undefined;
-      if (env.JOBAI_AI_AGENT_API_BASE_URL?.trim() && rtmp.length > 0) {
+
+      if (rtmpSttBridge.isEnabled()) {
+        try {
+          const out = await rtmpSttBridge.start({
+            numericMeetingId: input.meetingId,
+            internalMeetingId: internalId,
+            controlWsHub: deps.controlWsHub,
+            runtimeEvents: deps.runtimeEvents
+          });
+          agentReceiverRTMPURL = out.agentReceiverRTMPURL;
+          metadata.agentReceiverRTMPURL = agentReceiverRTMPURL;
+        } catch (err: unknown) {
+          logger.warn(
+            { err, meetingId: input.meetingId, error: err instanceof Error ? err.message : String(err) },
+            "rtmp receiver/stt start failed"
+          );
+          respondError(res, 400, "rtmp_receiver_not_ready");
+          return;
+        }
+      } else if (env.JOBAI_AI_AGENT_API_BASE_URL?.trim() && rtmp.length > 0) {
         try {
           const out = await forwardAiAgentMeetingStart({
             meetingId: input.meetingId,
@@ -328,6 +355,7 @@ export function createMeetingRouter(
       const rtmpOnly = rtmp.length > 0;
       if (rtmpOnly) {
         if (!rtmpTtsSessionManager.isEnabled()) {
+          await rtmpSttBridge.stop(input.meetingId);
           orchestrator.stopMeeting(internalId, {
             reason: "manual_stop",
             finalStatus: "stopped_during_meeting",
@@ -348,6 +376,7 @@ export function createMeetingRouter(
           rtmpTtsAudioTap.register(internalId, input.meetingId);
         } catch (err: unknown) {
           rtmpTtsAudioTap.unregister(internalId);
+          await rtmpSttBridge.stop(input.meetingId);
           orchestrator.stopMeeting(internalId, {
             reason: "manual_stop",
             finalStatus: "stopped_during_meeting",
@@ -505,6 +534,7 @@ export function createMeetingRouter(
     }).catch(() => undefined);
     rtmpTtsAudioTap.unregister(internalId);
     await rtmpTtsSessionManager.stop(input.meetingId);
+    await rtmpSttBridge.stop(input.meetingId);
     deps.avatarRuntime?.stop(internalId, input.stopReason);
     deps.controlWsHub?.closeMeeting(input.meetingId, "meeting_stopped");
     res.status(200).json({

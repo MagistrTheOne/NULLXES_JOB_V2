@@ -47,6 +47,7 @@ import { ObserverSessionTicketSigner } from "./services/observerSessionTicketSig
 import { MeetingOrchestrator } from "./services/meetingOrchestrator";
 import { AvatarRuntimeSessionManager } from "./services/avatarRuntimeSessionManager";
 import { MeetingControlWsHub } from "./services/meetingControlWsHub";
+import { rtmpSttBridge } from "./services/rtmpSttBridge";
 import { MeetingStateMachine } from "./services/meetingStateMachine";
 import { OpenAIRealtimeClient } from "./services/openaiRealtimeClient";
 import { PostMeetingProcessor } from "./services/postMeetingProcessor";
@@ -131,7 +132,8 @@ export async function createApp(): Promise<AppContext> {
     sessionState: runtimeSessionState,
     a2fRuntime: a2fRuntimeClient
   });
-  meetingControlWsHub.setPauseChangeHandler(({ internalMeetingId, pauseEnabled }) => {
+  meetingControlWsHub.setPauseChangeHandler(({ numericMeetingId, internalMeetingId, pauseEnabled }) => {
+    rtmpSttBridge.setPauseEnabled(numericMeetingId, pauseEnabled);
     if (pauseEnabled) {
       avatarRuntimeSessionManager.pause(internalMeetingId, "meeting_control_ws");
       return;

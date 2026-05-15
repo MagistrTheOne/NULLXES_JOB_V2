@@ -152,7 +152,12 @@ export class AvatarRuntimeSessionManager {
       session.engine = engine;
       session.facialFrameUnsub = facialFrameUnsub;
       try {
-        await engine.start({ meetingId: input.meetingId, sessionId, openAiAudioRateHz: 24_000 });
+        await engine.start({
+          meetingId: input.meetingId,
+          sessionId,
+          openAiAudioRateHz: 24_000,
+          liveKitRoomName: input.meetingId
+        });
         session.state = "active";
         this.touch(session);
         await this.options.sessionState?.upsert(input.meetingId, {
@@ -227,7 +232,12 @@ export class AvatarRuntimeSessionManager {
     });
     session.engine = engine;
     try {
-      await engine.start({ meetingId: input.meetingId, sessionId, openAiAudioRateHz: 24_000 });
+      await engine.start({
+        meetingId: input.meetingId,
+        sessionId,
+        openAiAudioRateHz: 24_000,
+        liveKitRoomName: input.meetingId
+      });
       session.state = "active";
       this.touch(session);
       await this.options.sessionState?.upsert(input.meetingId, {

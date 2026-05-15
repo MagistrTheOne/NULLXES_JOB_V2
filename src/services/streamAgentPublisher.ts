@@ -7,8 +7,17 @@ import { resamplePcm16Linear } from "./audioResampler";
 
 export type StreamPublisherState = "idle" | "connecting" | "connected" | "failed" | "closed";
 
+/** Shared connect payload for Stream vs LiveKit avatar publishers. */
+export interface AgentPublisherConnectInput {
+  meetingId: string;
+  sessionId: string;
+  audioInRateHz?: number;
+  /** LiveKit room name when it differs from `meetingId` (JobAI uses `nullxes-meeting-<id>` == meetingId). */
+  liveKitRoomName?: string;
+}
+
 export interface AgentMediaPublisher {
-  connect(input: { meetingId: string; sessionId: string; audioInRateHz?: number }): Promise<void>;
+  connect(input: AgentPublisherConnectInput): Promise<void>;
   publishAudioPcm16(chunk: Buffer, timestampMs: number, inputSampleRateHz?: number): Promise<void>;
   publishVideoFrameI420(i420: Buffer, width: number, height: number, timestampMs: number): Promise<void>;
   close(): Promise<void>;
@@ -82,7 +91,7 @@ export class StreamAgentPublisher implements AgentMediaPublisher {
     return this.state;
   }
 
-  async connect(input: { meetingId: string; sessionId: string; audioInRateHz?: number }): Promise<void> {
+  async connect(input: AgentPublisherConnectInput): Promise<void> {
     if (this.state === "connected" && this.meetingId === input.meetingId && this.sessionId === input.sessionId) {
       return;
     }

@@ -94,7 +94,13 @@ export class AvatarRuntimeEngine {
     this.maxInFlight = env.RUNPOD_WORKER_MAX_INFLIGHT;
   }
 
-  async start(input: { meetingId: string; sessionId: string; openAiAudioRateHz?: number }): Promise<void> {
+  async start(input: {
+    meetingId: string;
+    sessionId: string;
+    openAiAudioRateHz?: number;
+    /** Same as JobAI LiveKit room when using `AVATAR_MEDIA_PROVIDER=livekit` (e.g. `nullxes-meeting-123`). */
+    liveKitRoomName?: string;
+  }): Promise<void> {
     if (this.running) return;
     this.running = true;
     this.meetingId = input.meetingId;
@@ -104,7 +110,8 @@ export class AvatarRuntimeEngine {
     await this.publisher.connect({
       meetingId: input.meetingId,
       sessionId: input.sessionId,
-      audioInRateHz: input.openAiAudioRateHz
+      audioInRateHz: input.openAiAudioRateHz,
+      ...(input.liveKitRoomName ? { liveKitRoomName: input.liveKitRoomName } : {})
     });
 
     // Subscribe to OpenAI orchestrator events.

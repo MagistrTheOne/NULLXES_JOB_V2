@@ -41,6 +41,8 @@ export type RuntimeEventType =
   | "openai.orchestrator.started"
   | "openai.mic.append"
   | "openai.orchestrator.closed"
+  | "rtmp.stt.started"
+  | "rtmp.stt.transcript_delta"
   | "avatar.telemetry"
   | "avatar.buffering"
   | "avatar.degraded"

@@ -143,6 +143,18 @@ const envSchema = z.object({
   AVATAR_VIDEO_DEGRADED_FALLBACK: z.enum(["static", "none"]).default("static"),
   /** CHТЗ #3 — OpenAI Realtime assistant PCM → ffmpeg → RTMP (LiveKit ingress URL from POST /meetings/start). */
   RTMP_INGRESS_ENABLED: envBoolean(true),
+  /** CHТЗ #2 — per-meeting ffmpeg RTMP listen → PCM → OpenAI Realtime STT. */
+  RTMP_RECEIVER_ENABLED: envBoolean(false),
+  RTMP_RECEIVER_PUBLIC_HOST: z.string().min(1).default("127.0.0.1"),
+  RTMP_RECEIVER_PORT_START: z.coerce.number().int().min(1024).max(65535).default(19350),
+  RTMP_RECEIVER_PORT_END: z.coerce.number().int().min(1024).max(65535).default(19380),
+  RTMP_RECEIVER_APP: z.string().min(1).default("live"),
+  /** ffmpeg `-timeout` for RTMP listen (microseconds). */
+  RTMP_RECEIVER_LISTEN_TIMEOUT_US: z.coerce.number().int().positive().default(15_000_000),
+  /** Optional override for Realtime WS `?model=` on STT path; defaults to OPENAI_REALTIME_MODEL. */
+  OPENAI_STT_MODEL: z.string().optional(),
+  /** Model id inside `input_audio_transcription` on the STT session. */
+  OPENAI_INPUT_TRANSCRIPTION_MODEL: z.string().default("gpt-4o-mini-transcribe"),
   FFMPEG_PATH: z.string().min(1).default("ffmpeg"),
   OPENAI_TTS_MODEL: z.string().default("gpt-4o-mini-tts"),
   OPENAI_TTS_VOICE: z.string().optional(),
@@ -253,6 +265,14 @@ const envSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["A2F_GPU_RUNTIME_WS_URL"],
       message: "A2F_GPU_RUNTIME_WS_URL is required when A2F_RUNTIME_TRANSPORT=gpu_pod"
+    });
+  }
+
+  if (values.RTMP_RECEIVER_PORT_START > values.RTMP_RECEIVER_PORT_END) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["RTMP_RECEIVER_PORT_START"],
+      message: "RTMP_RECEIVER_PORT_START must be <= RTMP_RECEIVER_PORT_END"
     });
   }
 
