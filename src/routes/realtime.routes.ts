@@ -230,8 +230,12 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
     const meetingId =
       typeof event.meetingId === "string"
         ? event.meetingId
+        : typeof event.meetingId === "number"
+          ? String(event.meetingId)
         : typeof normalized.meetingId === "string"
           ? normalized.meetingId
+          : typeof normalized.meetingId === "number"
+            ? String(normalized.meetingId)
           : undefined;
     const realtimeEvent = {
       meetingId,

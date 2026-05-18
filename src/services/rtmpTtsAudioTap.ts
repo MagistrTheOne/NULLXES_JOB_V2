@@ -16,11 +16,17 @@ class RtmpTtsAudioTap {
   private readonly byInternal = new Map<string, TapRegistration>();
 
   register(internalMeetingId: string, numericMeetingId: number): void {
-    this.unregister(internalMeetingId);
+    this.unregisterByNumeric(numericMeetingId);
     this.byInternal.set(internalMeetingId, { internalMeetingId, numericMeetingId });
+    this.byInternal.set(String(numericMeetingId), { internalMeetingId, numericMeetingId });
   }
 
   unregister(internalMeetingId: string): void {
+    const reg = this.byInternal.get(internalMeetingId);
+    if (reg) {
+      this.unregisterByNumeric(reg.numericMeetingId);
+      return;
+    }
     this.byInternal.delete(internalMeetingId);
   }
 
