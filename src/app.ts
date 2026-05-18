@@ -48,6 +48,7 @@ import { MeetingOrchestrator } from "./services/meetingOrchestrator";
 import { AvatarRuntimeSessionManager } from "./services/avatarRuntimeSessionManager";
 import { MeetingControlWsHub } from "./services/meetingControlWsHub";
 import { rtmpSttBridge } from "./services/rtmpSttBridge";
+import { rtmpTtsSessionManager } from "./services/rtmpTtsSessionManager";
 import { MeetingStateMachine } from "./services/meetingStateMachine";
 import { OpenAIRealtimeClient } from "./services/openaiRealtimeClient";
 import { PostMeetingProcessor } from "./services/postMeetingProcessor";
@@ -184,6 +185,61 @@ export async function createApp(): Promise<AppContext> {
   );
   meetingOrchestrator.setQuestionChangeHandler(({ meetingId, questionIndex }) => {
     avatarRuntimeSessionManager.publishCurrentQuestion(meetingId, questionIndex);
+  });
+  for (const meeting of meetingStore.listMeetings()) {
+    const internalIdMatch = /^nullxes-meeting-(\d+)$/.exec(meeting.meetingId);
+    const numericMeetingId =
+      typeof meeting.metadata?.numericMeetingId === "number"
+        ? meeting.metadata.numericMeetingId
+        : internalIdMatch
+          ? Number(internalIdMatch[1])
+          : undefined;
+    const publisher = typeof numericMeetingId === "number" ? rtmpTtsSessionManager.getSnapshot(numericMeetingId) : undefined;
+    if (
+      meeting.status === "in_meeting" &&
+      publisher &&
+      !publisher.active &&
+      ["missing", "exited", "failed", "stopped"].includes(publisher.state)
+    ) {
+      meetingOrchestrator.updateMeetingMetadata(meeting.meetingId, {
+        rtmpIngressStatus: "publisher_missing_after_restart",
+        runtimeHealth: "dead",
+        publisherMissingAfterRestartAt: new Date().toISOString(),
+        lastKnownPublisherState: publisher.state
+      });
+      logger.warn(
+        { meetingId: meeting.meetingId, numericMeetingId, publisherState: publisher.state },
+        "persisted in_meeting restored without active RTMP publisher"
+      );
+    }
+  }
+  rtmpTtsSessionManager.onPublisherExit(({ meetingId: numericMeetingId, snapshot }) => {
+    const internalId = `nullxes-meeting-${numericMeetingId}`;
+    const meeting = meetingOrchestrator.tryGetMeeting(internalId);
+    if (!meeting || meeting.status !== "in_meeting") {
+      return;
+    }
+    meetingOrchestrator.updateMeetingMetadata(internalId, {
+      rtmpIngressStatus: "publisher_exited",
+      runtimeHealth: "dead",
+      degraded: true,
+      publisherExitedAt: new Date(snapshot.exitedAt ?? Date.now()).toISOString(),
+      publisherExitCode: snapshot.exitCode ?? null,
+      lastKnownPublisherState: snapshot.state
+    });
+    void runtimeEvents.append({
+      type: "rtmp.tts.publisher_exited",
+      meetingId: internalId,
+      actor: "gateway",
+      payload: {
+        numericMeetingId,
+        publisherState: snapshot.state,
+        exitCode: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        pid: snapshot.pid ?? null,
+        rtmpIngressStatus: "publisher_exited"
+      }
+    }).catch(() => undefined);
   });
 
   const inviteLivekitCache = new InviteLivekitResponseCache();

@@ -107,7 +107,12 @@ export function createJobaiWebrtcProxyRouter(deps: JobaiWebrtcProxyRouterDeps): 
           ...(Object.keys(ingressFromPartner).length > 0 ? { ingress: ingressFromPartner } : {})
         };
       } else {
-        // Комната и ingress создаётся контуром JobAI/LiveKit; gateway не вызывает LiveKit Room API.
+        /**
+         * LiveKit RTMP ingress lifecycle is owned by JobAI / LiveKit contour.
+         * Gateway does not create ingress.
+         * Gateway only consumes provided agentRTMPURL
+         * and publishes AI audio through ffmpeg.
+         */
         liveKitResponse = {
           configured: true,
           roomName,

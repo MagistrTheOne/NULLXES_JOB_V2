@@ -43,6 +43,7 @@ export type RuntimeEventType =
   | "openai.orchestrator.closed"
   | "rtmp.stt.started"
   | "rtmp.stt.transcript_delta"
+  | "rtmp.tts.publisher_exited"
   | "avatar.telemetry"
   | "avatar.buffering"
   | "avatar.degraded"

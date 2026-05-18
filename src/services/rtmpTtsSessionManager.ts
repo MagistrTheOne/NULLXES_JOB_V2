@@ -2,6 +2,12 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { env } from "../config/env";
 import { logger } from "../logging/logger";
 
+/**
+ * LiveKit RTMP ingress lifecycle is owned by JobAI / LiveKit contour.
+ * Gateway does not create ingress.
+ * Gateway only consumes provided agentRTMPURL
+ * and publishes AI audio through ffmpeg.
+ */
 export interface RtmpTtsSession {
   meetingId: number;
   ffmpeg: ChildProcess;
@@ -18,17 +24,34 @@ export type RtmpTtsSessionStatus =
   | "failed"
   | "stopped";
 
+export type RtmpTtsPublisherState =
+  | "missing"
+  | "spawning"
+  | "active"
+  | "exited"
+  | "failed"
+  | "stopped"
+  | "recovered";
+
 export interface RtmpTtsSessionSnapshot {
   meetingId: number;
   status: RtmpTtsSessionStatus;
+  state: RtmpTtsPublisherState;
   active: boolean;
   rtmpUrl?: string;
   startedAt?: number;
+  exitedAt?: number;
   updatedAt: number;
   exitCode?: number | null;
+  pid?: number;
   signal?: NodeJS.Signals | null;
   lastError?: string;
   lastStderr?: string;
+}
+
+export interface RtmpTtsPublisherExitEvent {
+  meetingId: number;
+  snapshot: RtmpTtsSessionSnapshot;
 }
 
 /** Redact stream keys / credentials from RTMP URLs for logs. */
@@ -55,6 +78,7 @@ export function truncateRtmpUrl(url: string): string {
 class RtmpTtsSessionManager {
   private readonly sessions = new Map<number, RtmpTtsSession>();
   private readonly snapshots = new Map<number, RtmpTtsSessionSnapshot>();
+  private readonly exitListeners = new Set<(event: RtmpTtsPublisherExitEvent) => void>();
 
   isEnabled(): boolean {
     return env.RTMP_INGRESS_ENABLED;
@@ -64,6 +88,13 @@ class RtmpTtsSessionManager {
     return this.sessions.has(meetingId);
   }
 
+  onPublisherExit(listener: (event: RtmpTtsPublisherExitEvent) => void): () => void {
+    this.exitListeners.add(listener);
+    return () => {
+      this.exitListeners.delete(listener);
+    };
+  }
+
   getSnapshot(meetingId: number): RtmpTtsSessionSnapshot {
     const session = this.sessions.get(meetingId);
     if (session) {
@@ -71,9 +102,11 @@ class RtmpTtsSessionManager {
       return {
         meetingId,
         status: existing?.status === "starting" ? "starting" : "spawned",
+        state: existing?.state === "recovered" ? "recovered" : existing?.status === "starting" ? "spawning" : "active",
         active: true,
         rtmpUrl: truncateRtmpUrl(session.rtmpUrl),
         startedAt: session.startedAt,
+        pid: session.ffmpeg.pid,
         updatedAt: existing?.updatedAt ?? session.startedAt,
         lastStderr: existing?.lastStderr,
         lastError: existing?.lastError
@@ -83,16 +116,18 @@ class RtmpTtsSessionManager {
       this.snapshots.get(meetingId) ?? {
         meetingId,
         status: "missing_agent_rtmp_url",
+        state: "missing",
         active: false,
         updatedAt: Date.now()
       }
     );
   }
 
-  async start(input: { meetingId: number; rtmpUrl: string }): Promise<void> {
+  async start(input: { meetingId: number; rtmpUrl: string; recovered?: boolean }): Promise<void> {
     if (!this.isEnabled()) {
       this.setSnapshot(input.meetingId, {
         status: "disabled",
+        state: "missing",
         active: false,
         lastError: "rtmp_ingress_disabled"
       });
@@ -102,6 +137,7 @@ class RtmpTtsSessionManager {
     await this.stop(input.meetingId);
     this.setSnapshot(input.meetingId, {
       status: "starting",
+      state: "spawning",
       active: false,
       rtmpUrl: truncateRtmpUrl(input.rtmpUrl)
     });
@@ -139,6 +175,7 @@ class RtmpTtsSessionManager {
       const message = err instanceof Error ? err.message : String(err);
       this.setSnapshot(input.meetingId, {
         status: "failed",
+        state: "failed",
         active: false,
         rtmpUrl: truncateRtmpUrl(input.rtmpUrl),
         lastError: message
@@ -173,6 +210,7 @@ class RtmpTtsSessionManager {
       proc.on("error", (err) => {
         this.setSnapshot(input.meetingId, {
           status: "failed",
+          state: "failed",
           active: false,
           rtmpUrl: rtmpSafe,
           lastError: err.message,
@@ -199,8 +237,10 @@ class RtmpTtsSessionManager {
           }`;
           this.setSnapshot(input.meetingId, {
             status: "failed",
+            state: "failed",
             active: false,
             rtmpUrl: rtmpSafe,
+            exitedAt: Date.now(),
             exitCode: code,
             signal,
             lastError: message,
@@ -212,14 +252,21 @@ class RtmpTtsSessionManager {
         const current = this.sessions.get(input.meetingId);
         if (current?.ffmpeg === proc) {
           this.sessions.delete(input.meetingId);
-          this.setSnapshot(input.meetingId, {
+          const exitedSnapshot = this.setSnapshot(input.meetingId, {
             status: "exited",
+            state: "exited",
             active: false,
             rtmpUrl: rtmpSafe,
             startedAt: current.startedAt,
+            exitedAt: Date.now(),
             exitCode: code,
+            pid: proc.pid,
             signal,
             lastStderr: stderr.trim() || undefined
+          });
+          this.notifyPublisherExit({
+            meetingId: input.meetingId,
+            snapshot: exitedSnapshot
           });
           logger.warn(
             { meetingId: input.meetingId, rtmp: rtmpSafe, code, signal, ffmpeg: stderr.trim() || undefined },
@@ -229,17 +276,20 @@ class RtmpTtsSessionManager {
       });
     });
 
+    const startedAt = Date.now();
     this.sessions.set(input.meetingId, {
       meetingId: input.meetingId,
       ffmpeg: proc,
       rtmpUrl: input.rtmpUrl,
-      startedAt: Date.now()
+      startedAt
     });
     this.setSnapshot(input.meetingId, {
       status: "spawned",
+      state: input.recovered ? "recovered" : "active",
       active: true,
       rtmpUrl: rtmpSafe,
-      startedAt: Date.now(),
+      startedAt,
+      pid: proc.pid,
       lastStderr: stderr.trim() || undefined
     });
 
@@ -273,9 +323,12 @@ class RtmpTtsSessionManager {
     const stoppedAt = Date.now();
     this.setSnapshot(meetingId, {
       status: "stopped",
+      state: "stopped",
       active: false,
       rtmpUrl: truncateRtmpUrl(session.rtmpUrl),
       startedAt: session.startedAt,
+      exitedAt: stoppedAt,
+      pid: proc.pid,
       updatedAt: stoppedAt
     });
     await new Promise<void>((resolve) => {
@@ -321,13 +374,20 @@ class RtmpTtsSessionManager {
 
   private setSnapshot(
     meetingId: number,
-    patch: Omit<Partial<RtmpTtsSessionSnapshot>, "meetingId"> & { status: RtmpTtsSessionStatus; active: boolean }
-  ): void {
-    this.snapshots.set(meetingId, {
+    patch: Omit<Partial<RtmpTtsSessionSnapshot>, "meetingId"> & {
+      status: RtmpTtsSessionStatus;
+      state?: RtmpTtsPublisherState;
+      active: boolean;
+    }
+  ): RtmpTtsSessionSnapshot {
+    const snapshot: RtmpTtsSessionSnapshot = {
       meetingId,
       updatedAt: Date.now(),
+      state: this.stateForStatus(patch.status),
       ...patch
-    });
+    };
+    this.snapshots.set(meetingId, snapshot);
+    return snapshot;
   }
 
   private mergeSnapshot(meetingId: number, patch: Partial<Omit<RtmpTtsSessionSnapshot, "meetingId">>): void {
@@ -337,6 +397,37 @@ class RtmpTtsSessionManager {
       ...patch,
       updatedAt: Date.now()
     });
+  }
+
+  private stateForStatus(status: RtmpTtsSessionStatus): RtmpTtsPublisherState {
+    switch (status) {
+      case "starting":
+        return "spawning";
+      case "spawned":
+        return "active";
+      case "exited":
+        return "exited";
+      case "failed":
+        return "failed";
+      case "stopped":
+        return "stopped";
+      case "missing_agent_rtmp_url":
+      case "disabled":
+        return "missing";
+    }
+  }
+
+  private notifyPublisherExit(event: RtmpTtsPublisherExitEvent): void {
+    for (const listener of this.exitListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        logger.warn(
+          { meetingId: event.meetingId, error: error instanceof Error ? error.message : String(error) },
+          "rtmp tts publisher exit listener failed"
+        );
+      }
+    }
   }
 }
 

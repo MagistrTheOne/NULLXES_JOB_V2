@@ -10,11 +10,9 @@ import { StreamRecordingStateError, type StreamRecordingService } from "../servi
 import type { RuntimeEventStore } from "../services/runtimeEventStore";
 import type { MeetingControlWsHub } from "../services/meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
-import { forwardAiAgentMeetingStart, RtmpReceiverNotReadyError } from "../services/jobAiAiAgentForwarder";
 import { rtmpSttBridge } from "../services/rtmpSttBridge";
-import { rtmpReceiverSessionManager } from "../services/rtmpReceiverSessionManager";
 import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
-import { rtmpTtsSessionManager, truncateRtmpUrl } from "../services/rtmpTtsSessionManager";
+import { rtmpTtsSessionManager, truncateRtmpUrl, type RtmpTtsSessionSnapshot } from "../services/rtmpTtsSessionManager";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
 import type { FailMeetingInput, MeetingRecord, StartMeetingInput, StopMeetingInput } from "../types/meeting";
 import type { JobAiInterviewStatus, StoredInterview } from "../types/interview";
@@ -52,6 +50,18 @@ const controlStartMeetingSchema = z.object({
   meetingId: z.number().int().positive(),
   agentRTMPURL: z.string().min(1).optional()
 });
+
+/**
+ * TEMPORARY STRICT-CHTZ MODE
+ *
+ * Current integration contract only requires:
+ * OpenAI TTS -> ffmpeg -> LiveKit RTMP ingress.
+ *
+ * Receiver/STT bridge lifecycle is intentionally disabled
+ * until duplex realtime contour is required.
+ */
+const ENABLE_RTMP_RECEIVER = false;
+const STUB_AGENT_RECEIVER_RTMP_URL = "stub://receiver-disabled";
 
 function normalizeControlStopMeetingBody(body: unknown): unknown {
   if (!body || typeof body !== "object") {
@@ -238,6 +248,64 @@ function rtmpIngressStatusFor(input: { rtmp: string; ttsActive?: boolean }): str
   return input.ttsActive ? "publisher_spawned" : "publisher_not_started";
 }
 
+function isRecoverablePublisherSnapshot(snapshot: RtmpTtsSessionSnapshot): boolean {
+  return !snapshot.active && (
+    snapshot.state === "missing" ||
+    snapshot.state === "exited" ||
+    snapshot.state === "failed" ||
+    snapshot.state === "stopped"
+  );
+}
+
+function rtmpIngressStatusForSnapshot(input: { rtmp: string; snapshot: RtmpTtsSessionSnapshot }): string {
+  if (!input.rtmp) {
+    return "missing_agent_rtmp_url";
+  }
+  if (!rtmpTtsSessionManager.isEnabled()) {
+    return "rtmp_ingress_disabled";
+  }
+  if (input.snapshot.state === "recovered") {
+    return "publisher_recovered";
+  }
+  if (input.snapshot.active) {
+    return "publisher_spawned";
+  }
+  return `publisher_${input.snapshot.state}`;
+}
+
+type RuntimeHealth = "healthy" | "degraded" | "dead";
+
+function runtimeHealthFor(input: {
+  meeting?: MeetingRecord;
+  publisher: RtmpTtsSessionSnapshot;
+  receiverActive: boolean;
+  receiverEnabled: boolean;
+}): RuntimeHealth {
+  if (!input.meeting || isFinishedMeeting(input.meeting)) {
+    return "dead";
+  }
+  if (!input.publisher.active) {
+    return input.meeting.status === "in_meeting" ? "dead" : "degraded";
+  }
+  if (input.receiverEnabled && !input.receiverActive) {
+    return "degraded";
+  }
+  return "healthy";
+}
+
+function numericMeetingIdFromPath(value: string): number | undefined {
+  const trimmed = value.trim();
+  const match = /^nullxes-meeting-(\d+)$/.exec(trimmed);
+  const numeric = match ? Number(match[1]) : /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : undefined;
+}
+
+/**
+ * LiveKit RTMP ingress lifecycle is owned by JobAI / LiveKit contour.
+ * Gateway does not create ingress.
+ * Gateway only consumes provided agentRTMPURL
+ * and publishes AI audio through ffmpeg.
+ */
 export function createMeetingRouter(
   orchestrator: MeetingOrchestrator,
   deps?: {
@@ -310,29 +378,134 @@ export function createMeetingRouter(
       }
 
       const internalId = internalMeetingId(input.meetingId);
+      const resolvedAgentRtmp = resolveAgentRtmpUrl(input, stored);
+      const rtmp = resolvedAgentRtmp.url;
+      logger.info(
+        {
+          meetingId: input.meetingId,
+          jobAiId: stored.jobAiId,
+          agentRTMPURLSource: resolvedAgentRtmp.source,
+          hasAgentRTMPURL: rtmp.length > 0,
+          rtmp: rtmp.length > 0 ? truncateRtmpUrl(rtmp) : undefined
+        },
+        "control meeting start: resolved agent RTMP URL"
+      );
+      if (rtmp.length === 0) {
+        logger.warn(
+          {
+            event: "missing_agent_rtmp_url",
+            meetingId: input.meetingId,
+            jobAiId: stored.jobAiId,
+            source: resolvedAgentRtmp.source
+          },
+          "control meeting start rejected without agent RTMP URL"
+        );
+        res.status(400).json({
+          errorCode: "missing_agent_rtmp_url",
+          message: "agentRTMPURL is required for RTMP ingress lifecycle"
+        });
+        return;
+      }
+
       const existingMeeting = orchestrator.tryGetMeeting(internalId);
       if (existingMeeting && !isFinishedMeeting(existingMeeting)) {
-        const existingReceiverUrl =
-          rtmpReceiverSessionManager.getAgentReceiverUrl(input.meetingId) ??
-          (typeof existingMeeting.metadata?.agentReceiverRTMPURL === "string"
-            ? existingMeeting.metadata.agentReceiverRTMPURL
-            : undefined);
-        const existingIngressStatus =
-          typeof existingMeeting.metadata?.rtmpIngressStatus === "string"
-            ? existingMeeting.metadata.rtmpIngressStatus
-            : rtmpTtsSessionManager.isActive(input.meetingId)
-              ? "publisher_spawned"
-              : undefined;
+        const publisherSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
+        if (isRecoverablePublisherSnapshot(publisherSnapshot)) {
+          if (!rtmpTtsSessionManager.isEnabled()) {
+            respondError(res, 400, "rtmp_publish_failed");
+            return;
+          }
+          try {
+            await rtmpTtsSessionManager.start({
+              meetingId: input.meetingId,
+              rtmpUrl: rtmp,
+              recovered: true
+            });
+            rtmpTtsAudioTap.register(internalId, input.meetingId);
+            const recoveredSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
+            const receiverActive = false;
+            const recoveredRuntimeHealth = runtimeHealthFor({
+              meeting: existingMeeting,
+              publisher: recoveredSnapshot,
+              receiverActive,
+              receiverEnabled: ENABLE_RTMP_RECEIVER
+            });
+            const previousRecoveryCount =
+              typeof existingMeeting.metadata?.publisherRecoveryCount === "number"
+                ? existingMeeting.metadata.publisherRecoveryCount
+                : 0;
+            orchestrator.updateMeetingMetadata(internalId, {
+              agentRTMPURL: rtmp,
+              agentRTMPURLSource: resolvedAgentRtmp.source,
+              rtmpIngressStatus: "publisher_recovered",
+              publisherRecoveredAt: new Date().toISOString(),
+              publisherRecoveryCount: previousRecoveryCount + 1,
+              lastRecoveredPublisherState: publisherSnapshot.state,
+              runtimeHealth: recoveredRuntimeHealth
+            });
+            void deps.runtimeEvents?.append({
+              type: "meeting.control.started",
+              meetingId: internalId,
+              jobAiId: stored.jobAiId,
+              actor: "nullxes_control_api",
+              payload: {
+                numericMeetingId: input.meetingId,
+                agentRTMPURLSource: resolvedAgentRtmp.source,
+                rtmpIngressStatus: "publisher_recovered",
+                previousPublisherState: publisherSnapshot.state,
+                publisherRecoveryCount: previousRecoveryCount + 1,
+                agentRTMPURL: rtmp
+              }
+            }).catch(() => undefined);
+            res.status(200).json({
+              state: "publisher_recovered" as const,
+              meetingId: internalId,
+              numericMeetingId: input.meetingId,
+              status: existingMeeting.status,
+              runtimeHealth: recoveredRuntimeHealth,
+              publisherState: recoveredSnapshot.state,
+              publisherActive: recoveredSnapshot.active,
+              receiverActive,
+              agentReceiverRTMPURL: STUB_AGENT_RECEIVER_RTMP_URL,
+              rtmpIngressStatus: "publisher_recovered",
+              agentRTMPURLSource: resolvedAgentRtmp.source,
+              pid: recoveredSnapshot.pid,
+              startedAt: recoveredSnapshot.startedAt
+            });
+            return;
+          } catch (err: unknown) {
+            rtmpTtsAudioTap.unregister(internalId);
+            logger.warn(
+              { meetingId: input.meetingId, internalId, error: err instanceof Error ? err.message : String(err) },
+              "rtmp tts recovery failed"
+            );
+            respondError(res, 400, "rtmp_publish_failed");
+            return;
+          }
+        }
+        const existingIngressStatus = rtmpIngressStatusForSnapshot({ rtmp, snapshot: publisherSnapshot });
+        const receiverActive = false;
+        const runtimeHealth = runtimeHealthFor({
+          meeting: existingMeeting,
+          publisher: publisherSnapshot,
+          receiverActive,
+          receiverEnabled: ENABLE_RTMP_RECEIVER
+        });
         const existingAgentRtmpUrlSource =
-          typeof existingMeeting.metadata?.agentRTMPURLSource === "string" ? existingMeeting.metadata.agentRTMPURLSource : undefined;
+          typeof existingMeeting.metadata?.agentRTMPURLSource === "string"
+            ? existingMeeting.metadata.agentRTMPURLSource
+            : resolvedAgentRtmp.source;
         res.status(200).json({
           state: "meeting_already_started" as const,
           meetingId: internalId,
           numericMeetingId: input.meetingId,
           status: existingMeeting.status,
-          ...(existingReceiverUrl ? { agentReceiverRTMPURL: existingReceiverUrl } : {}),
-          ...(existingIngressStatus ? { rtmpIngressStatus: existingIngressStatus } : {}),
-          ...(existingAgentRtmpUrlSource ? { agentRTMPURLSource: existingAgentRtmpUrlSource } : {})
+          runtimeHealth,
+          publisherState: publisherSnapshot.state,
+          agentReceiverRTMPURL: STUB_AGENT_RECEIVER_RTMP_URL,
+          receiverActive,
+          rtmpIngressStatus: existingIngressStatus,
+          agentRTMPURLSource: existingAgentRtmpUrlSource
         });
         return;
       }
@@ -353,27 +526,14 @@ export function createMeetingRouter(
           questions: stored.rawPayload.specialty?.questions ?? []
         }
       };
-      const resolvedAgentRtmp = resolveAgentRtmpUrl(input, stored);
-      const rtmp = resolvedAgentRtmp.url;
       metadata.agentRTMPURLSource = resolvedAgentRtmp.source;
       metadata.rtmpIngressStatus = rtmpIngressStatusFor({ rtmp });
-      if (rtmp.length > 0) {
-        metadata.agentRTMPURL = rtmp;
-      }
-      logger.info(
-        {
-          meetingId: input.meetingId,
-          jobAiId: stored.jobAiId,
-          agentRTMPURLSource: resolvedAgentRtmp.source,
-          hasAgentRTMPURL: rtmp.length > 0,
-          rtmp: rtmp.length > 0 ? truncateRtmpUrl(rtmp) : undefined
-        },
-        "control meeting start: resolved agent RTMP URL"
-      );
+      metadata.agentRTMPURL = rtmp;
 
-      let agentReceiverRTMPURL: string | undefined;
+      let agentReceiverRTMPURL = STUB_AGENT_RECEIVER_RTMP_URL;
+      metadata.agentReceiverRTMPURL = agentReceiverRTMPURL;
 
-      if (rtmpSttBridge.isEnabled()) {
+      if (ENABLE_RTMP_RECEIVER && rtmpSttBridge.isEnabled()) {
         try {
           const out = await rtmpSttBridge.start({
             numericMeetingId: input.meetingId,
@@ -391,25 +551,6 @@ export function createMeetingRouter(
           respondError(res, 400, "rtmp_receiver_not_ready");
           return;
         }
-      } else if (env.JOBAI_AI_AGENT_API_BASE_URL?.trim() && rtmp.length > 0) {
-        try {
-          const out = await forwardAiAgentMeetingStart({
-            meetingId: input.meetingId,
-            meetingControlKey: stored.projection.meetingControlKey,
-            agentRTMPURL: rtmp
-          });
-          agentReceiverRTMPURL = out.agentReceiverRTMPURL;
-          metadata.agentReceiverRTMPURL = agentReceiverRTMPURL;
-        } catch (err: unknown) {
-          if (err instanceof RtmpReceiverNotReadyError) {
-            respondError(res, 400, "rtmp_receiver_not_ready");
-            return;
-          }
-          logger.warn(
-            { err, meetingId: input.meetingId, error: err instanceof Error ? err.message : String(err) },
-            "ai agent forward meetings/start failed (continuing without forward)"
-          );
-        }
       }
 
       const result = orchestrator.startMeeting({
@@ -418,64 +559,61 @@ export function createMeetingRouter(
         metadata
       });
 
-      const rtmpOnly = rtmp.length > 0;
-      if (rtmpOnly) {
-        if (!rtmpTtsSessionManager.isEnabled()) {
-          await rtmpSttBridge.stop(input.meetingId);
-          orchestrator.stopMeeting(internalId, {
-            reason: "manual_stop",
-            finalStatus: "stopped_during_meeting",
-            metadata: {
-              numericMeetingId: input.meetingId,
-              source: "nullxes_control_api",
-              stopReason: "rtmp_publish_failed"
-            }
-          });
-          respondError(res, 400, "rtmp_publish_failed");
-          return;
-        }
-        try {
-          await rtmpTtsSessionManager.start({
-            meetingId: input.meetingId,
-            rtmpUrl: rtmp
-          });
-          rtmpTtsAudioTap.register(internalId, input.meetingId);
-          metadata.rtmpIngressStatus = "publisher_spawned";
-        } catch (err: unknown) {
-          rtmpTtsAudioTap.unregister(internalId);
-          await rtmpSttBridge.stop(input.meetingId);
-          orchestrator.stopMeeting(internalId, {
-            reason: "manual_stop",
-            finalStatus: "stopped_during_meeting",
-            metadata: {
-              numericMeetingId: input.meetingId,
-              source: "nullxes_control_api",
-              stopReason: "rtmp_publish_failed"
-            }
-          });
-          metadata.rtmpIngressStatus = "publisher_start_failed";
-          logger.warn(
-            { meetingId: input.meetingId, internalId, error: err instanceof Error ? err.message : String(err) },
-            "rtmp tts start failed after meeting start — rolled back"
-          );
-          respondError(res, 400, "rtmp_publish_failed");
-          return;
-        }
+      if (!rtmpTtsSessionManager.isEnabled()) {
+        await rtmpSttBridge.stop(input.meetingId);
+        orchestrator.stopMeeting(internalId, {
+          reason: "manual_stop",
+          finalStatus: "stopped_during_meeting",
+          metadata: {
+            numericMeetingId: input.meetingId,
+            source: "nullxes_control_api",
+            stopReason: "rtmp_publish_failed"
+          }
+        });
+        respondError(res, 400, "rtmp_publish_failed");
+        return;
+      }
+      try {
+        await rtmpTtsSessionManager.start({
+          meetingId: input.meetingId,
+          rtmpUrl: rtmp
+        });
+        rtmpTtsAudioTap.register(internalId, input.meetingId);
+        const publisherSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
+        const receiverActive = false;
+        const runtimeHealth = runtimeHealthFor({
+          meeting: result.meeting,
+          publisher: publisherSnapshot,
+          receiverActive,
+          receiverEnabled: ENABLE_RTMP_RECEIVER
+        });
+        metadata.rtmpIngressStatus = "publisher_spawned";
+        orchestrator.updateMeetingMetadata(internalId, {
+          rtmpIngressStatus: "publisher_spawned",
+          runtimeHealth
+        });
+      } catch (err: unknown) {
+        rtmpTtsAudioTap.unregister(internalId);
+        await rtmpSttBridge.stop(input.meetingId);
+        orchestrator.stopMeeting(internalId, {
+          reason: "manual_stop",
+          finalStatus: "stopped_during_meeting",
+          metadata: {
+            numericMeetingId: input.meetingId,
+            source: "nullxes_control_api",
+            stopReason: "rtmp_publish_failed"
+          }
+        });
+        metadata.rtmpIngressStatus = "publisher_start_failed";
+        logger.warn(
+          { meetingId: input.meetingId, internalId, error: err instanceof Error ? err.message : String(err) },
+          "rtmp tts start failed after meeting start — rolled back"
+        );
+        respondError(res, 400, "rtmp_publish_failed");
+        return;
       }
 
       deps.presence?.markSessionStarted(input.meetingId);
-      if (!rtmpOnly) {
-        void deps.avatarRuntime?.startForMeeting({
-          meetingId: internalId,
-          numericMeetingId: input.meetingId,
-          sessionId: internalId
-        }).catch((error: unknown) => {
-          logger.warn(
-            { meetingId: internalId, numericMeetingId: input.meetingId, error: error instanceof Error ? error.message : String(error) },
-            "avatar runtime start failed after control meeting start"
-          );
-        });
-      }
       deps.interviews.attachSession(stored.jobAiId, {
         meetingId: internalId,
         nullxesStatus: "in_meeting"
@@ -504,7 +642,11 @@ export function createMeetingRouter(
         meetingId: internalId,
         numericMeetingId: input.meetingId,
         status: result.meeting.status,
-        ...(agentReceiverRTMPURL ? { agentReceiverRTMPURL } : {}),
+        runtimeHealth: result.meeting.metadata.runtimeHealth,
+        publisherState: rtmpTtsSessionManager.getSnapshot(input.meetingId).state,
+        publisherActive: rtmpTtsSessionManager.getSnapshot(input.meetingId).active,
+        receiverActive: false,
+        agentReceiverRTMPURL,
         agentRTMPURLSource: resolvedAgentRtmp.source,
         rtmpIngressStatus: metadata.rtmpIngressStatus
       });
@@ -632,6 +774,65 @@ export function createMeetingRouter(
     res.status(200).json(result);
   }));
 
+  router.get("/:meetingId/rtmp/status", (req: Request, res: Response) => {
+    let numericMeetingId = numericMeetingIdFromPath(req.params.meetingId);
+    let meetingId = numericMeetingId ? internalMeetingId(numericMeetingId) : req.params.meetingId;
+    let meeting = orchestrator.tryGetMeeting(meetingId);
+    if (!numericMeetingId && typeof meeting?.metadata?.numericMeetingId === "number") {
+      numericMeetingId = meeting.metadata.numericMeetingId;
+    }
+    if (numericMeetingId) {
+      meetingId = internalMeetingId(numericMeetingId);
+      meeting = meeting ?? orchestrator.tryGetMeeting(meetingId);
+    }
+    if (!numericMeetingId) {
+      res.status(400).json({ errorCode: "invalid_meeting_id" });
+      return;
+    }
+
+    const stored = deps?.interviews?.getInterviewByNumericMeetingId(numericMeetingId);
+    if (!stored && !meeting) {
+      res.status(404).json({ errorCode: "meeting_not_found" });
+      return;
+    }
+
+    const metadataSource =
+      typeof meeting?.metadata?.agentRTMPURLSource === "string"
+        ? (meeting.metadata.agentRTMPURLSource as AgentRtmpUrlSource)
+        : "missing";
+    const metadataRtmp = typeof meeting?.metadata?.agentRTMPURL === "string" ? meeting.metadata.agentRTMPURL.trim() : "";
+    const agentRtmp = stored ? resolveAgentRtmpUrl({}, stored) : { url: metadataRtmp, source: metadataSource };
+    const publisher = rtmpTtsSessionManager.getSnapshot(numericMeetingId);
+    const receiverActive = false;
+    const rtmpIngressStatus = rtmpIngressStatusForSnapshot({ rtmp: agentRtmp.url, snapshot: publisher });
+    const runtimeHealth = runtimeHealthFor({
+      meeting,
+      publisher,
+      receiverActive,
+      receiverEnabled: ENABLE_RTMP_RECEIVER
+    });
+
+    res.status(200).json({
+      meetingId,
+      numericMeetingId,
+      runtimeHealth,
+      publisherActive: publisher.active,
+      receiverActive,
+      meetingPersistedState: meeting?.status ?? null,
+      publisherState: publisher.state,
+      rtmpIngressStatus,
+      pid: publisher.pid ?? null,
+      startedAt: publisher.startedAt ?? null,
+      exitedAt: publisher.exitedAt ?? null,
+      exitCode: publisher.exitCode ?? null,
+      agentRTMPURLSource: agentRtmp.source,
+      hasAgentRTMPURL: agentRtmp.url.length > 0,
+      agentRTMPURL: agentRtmp.url.length > 0 ? truncateRtmpUrl(agentRtmp.url) : null,
+      agentReceiverRTMPURL: STUB_AGENT_RECEIVER_RTMP_URL,
+      publisher
+    });
+  });
+
   router.get("/ops/rtmp/:meetingId", (req: Request, res: Response) => {
     if (!deps?.interviews) {
       res.status(503).json({ errorCode: "interview_sync_not_configured" });
@@ -652,10 +853,14 @@ export function createMeetingRouter(
     const internalId = internalMeetingId(numericMeetingId);
     const meeting = orchestrator.tryGetMeeting(internalId);
     const agentRtmp = resolveAgentRtmpUrl({}, stored);
-    const receiverUrl =
-      rtmpReceiverSessionManager.getAgentReceiverUrl(numericMeetingId) ??
-      (typeof meeting?.metadata?.agentReceiverRTMPURL === "string" ? meeting.metadata.agentReceiverRTMPURL : undefined);
     const tts = rtmpTtsSessionManager.getSnapshot(numericMeetingId);
+    const receiverActive = false;
+    const runtimeHealth = runtimeHealthFor({
+      meeting,
+      publisher: tts,
+      receiverActive,
+      receiverEnabled: ENABLE_RTMP_RECEIVER
+    });
 
     res.status(200).json({
       meetingId: internalId,
@@ -664,6 +869,11 @@ export function createMeetingRouter(
       jobAiStatus: stored.rawPayload.status,
       nullxesStatus: stored.projection.nullxesStatus,
       meetingAt: stored.projection.meetingAt,
+      runtimeHealth,
+      publisherActive: tts.active,
+      receiverActive,
+      meetingPersistedState: meeting?.status ?? null,
+      publisherState: tts.state,
       gatewayMeeting: meeting
         ? {
             status: meeting.status,
@@ -672,8 +882,8 @@ export function createMeetingRouter(
               rtmpIngressStatus: meeting.metadata?.rtmpIngressStatus,
               agentRTMPURLSource: meeting.metadata?.agentRTMPURLSource,
               hasAgentRTMPURL: typeof meeting.metadata?.agentRTMPURL === "string" && meeting.metadata.agentRTMPURL.length > 0,
-              hasAgentReceiverRTMPURL:
-                typeof meeting.metadata?.agentReceiverRTMPURL === "string" && meeting.metadata.agentReceiverRTMPURL.length > 0
+              hasAgentReceiverRTMPURL: false,
+              strictChtzReceiverDisabled: !ENABLE_RTMP_RECEIVER
             }
           }
         : null,
@@ -681,16 +891,18 @@ export function createMeetingRouter(
         ingress: {
           enabled: rtmpTtsSessionManager.isEnabled(),
           status: tts.status,
+          state: tts.state,
           active: tts.active,
+          rtmpIngressStatus: rtmpIngressStatusForSnapshot({ rtmp: agentRtmp.url, snapshot: tts }),
           agentRTMPURLSource: agentRtmp.source,
           hasAgentRTMPURL: agentRtmp.url.length > 0,
           agentRTMPURL: agentRtmp.url.length > 0 ? truncateRtmpUrl(agentRtmp.url) : null,
           publisher: tts
         },
         receiver: {
-          enabled: rtmpSttBridge.isEnabled(),
-          active: Boolean(receiverUrl),
-          agentReceiverRTMPURL: receiverUrl ?? null
+          enabled: ENABLE_RTMP_RECEIVER,
+          active: receiverActive,
+          agentReceiverRTMPURL: STUB_AGENT_RECEIVER_RTMP_URL
         }
       },
       controlWsConnections: deps.controlWsHub?.getConnectionCount(numericMeetingId) ?? null
