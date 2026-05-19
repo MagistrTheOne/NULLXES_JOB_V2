@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { env } from "../config/env";
 import { logger } from "../logging/logger";
+import { rtmpPcmTransportDebug } from "./rtmpPcmTransportDebug";
 
 /**
  * LiveKit RTMP ingress lifecycle is owned by JobAI / LiveKit contour.
@@ -367,30 +368,80 @@ class RtmpTtsSessionManager {
 
   writePcm16(meetingId: number, chunk: Buffer): RtmpTtsWriteResult {
     const session = this.sessions.get(meetingId);
+    const publisherActive = this.isActive(meetingId);
+
     if (!session) {
-      return { written: false, reason: "no_session", totalBytesWritten: 0, chunksWritten: 0 };
+      const result = { written: false, reason: "no_session" as const, totalBytesWritten: 0, chunksWritten: 0 };
+      rtmpPcmTransportDebug.recordStdinWrite({
+        meetingId,
+        pcmBytes: chunk.length,
+        writeReturnedOk: false,
+        stdin: null,
+        bytesWritten: 0,
+        chunksWritten: 0,
+        written: false,
+        reason: result.reason,
+        publisherActive
+      });
+      return result;
     }
     const stdin = session.ffmpeg.stdin;
     if (!stdin || chunk.length === 0) {
-      return {
+      const reason = !stdin ? ("no_stdin" as const) : ("empty_chunk" as const);
+      const result = {
         written: false,
-        reason: !stdin ? "no_stdin" : "empty_chunk",
+        reason,
         totalBytesWritten: session.bytesWritten,
         chunksWritten: session.chunksWritten
       };
+      rtmpPcmTransportDebug.recordStdinWrite({
+        meetingId,
+        pcmBytes: chunk.length,
+        writeReturnedOk: false,
+        stdin,
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        written: false,
+        reason,
+        publisherActive
+      });
+      return result;
     }
     if (stdin.destroyed || stdin.writableEnded) {
-      return {
+      const result = {
         written: false,
-        reason: "stdin_closed",
+        reason: "stdin_closed" as const,
         totalBytesWritten: session.bytesWritten,
         chunksWritten: session.chunksWritten
       };
+      rtmpPcmTransportDebug.recordStdinWrite({
+        meetingId,
+        pcmBytes: chunk.length,
+        writeReturnedOk: false,
+        stdin,
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        written: false,
+        reason: result.reason,
+        publisherActive
+      });
+      return result;
     }
     try {
       const ok = stdin.write(chunk);
       if (!ok) {
-        stdin.once("drain", () => undefined);
+        rtmpPcmTransportDebug.recordStdinBackpressure({
+          meetingId,
+          pcmBytes: chunk.length,
+          stdin
+        });
+        if (env.RTMP_PCM_TRANSPORT_DEBUG) {
+          stdin.once("drain", () => {
+            rtmpPcmTransportDebug.onStdinDrain(meetingId);
+          });
+        } else {
+          stdin.once("drain", () => undefined);
+        }
       }
       session.bytesWritten += chunk.length;
       session.chunksWritten += 1;
@@ -399,6 +450,16 @@ class RtmpTtsSessionManager {
         bytesWritten: session.bytesWritten,
         chunksWritten: session.chunksWritten,
         lastWriteAt: session.lastWriteAt
+      });
+      rtmpPcmTransportDebug.recordStdinWrite({
+        meetingId,
+        pcmBytes: chunk.length,
+        writeReturnedOk: ok,
+        stdin,
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        written: true,
+        publisherActive
       });
       if (session.chunksWritten === 1) {
         const snap = this.getSnapshot(meetingId);
@@ -431,6 +492,17 @@ class RtmpTtsSessionManager {
         },
         "rtmp tts ffmpeg stdin write failed"
       );
+      rtmpPcmTransportDebug.recordStdinWrite({
+        meetingId,
+        pcmBytes: chunk.length,
+        writeReturnedOk: false,
+        stdin,
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        written: false,
+        reason: "write_failed",
+        publisherActive
+      });
       return {
         written: false,
         reason: "write_failed",
@@ -445,6 +517,7 @@ class RtmpTtsSessionManager {
     if (!session) {
       return;
     }
+    rtmpPcmTransportDebug.resetMeeting(meetingId);
     this.sessions.delete(meetingId);
 
     const proc = session.ffmpeg;

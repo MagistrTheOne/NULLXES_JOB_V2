@@ -38,6 +38,21 @@ ffmpeg -hide_banner -loglevel info \
 | `OPENAI_TTS_VOICE` | *(falls back to `OPENAI_REALTIME_VOICE`)* | REST TTS voice for smoke |
 | `RTMP_INGRESS_SMOKE_ENABLED` | `false` | **TEMP** — after `publisher_spawned`, loop OpenAI speech PCM → ffmpeg stdin (no frontend) |
 | `RTMP_INGRESS_SMOKE_INTERVAL_MS` | `4500` | Tick interval for smoke loop (3–15 s) |
+| `RTMP_PCM_TRANSPORT_DEBUG` | `false` | Forensic logs: delta/write gaps, backpressure, 5s rollup (`rtmp_pcm_*` events) |
+
+### PCM transport forensic debug
+
+When `RTMP_PCM_TRANSPORT_DEBUG=true`, gateway logs (no behavior change):
+
+- `rtmp_pcm_delta_ingress` — each decoded Realtime audio delta; key field `gapSincePrevDeltaMs`
+- `rtmp_pcm_stdin_write` — throttled stdin writes; `gapSincePrevWriteMs`, `writeReturnedOk`
+- `rtmp_pcm_stdin_backpressure` / `rtmp_pcm_stdin_drain` — Node stream backpressure
+- `rtmp_pcm_transport_rollup` — every 5s per active meeting
+
+```bash
+sudo journalctl -u nullxes-job-v2 -f --no-pager | grep -E \
+"rtmp_pcm_delta_ingress|rtmp_pcm_stdin_write|rtmp_pcm_stdin_backpressure|rtmp_pcm_stdin_drain|rtmp_pcm_transport_rollup|stdin_closed|ffmpeg exited|publisher_exited"
+```
 
 ### Ingress runtime smoke (TEMP)
 

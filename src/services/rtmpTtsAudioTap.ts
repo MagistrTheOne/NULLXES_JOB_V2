@@ -1,4 +1,5 @@
 import { logger } from "../logging/logger";
+import { rtmpPcmTransportDebug } from "./rtmpPcmTransportDebug";
 import { rtmpTtsSessionManager, type RtmpTtsWriteResult } from "./rtmpTtsSessionManager";
 
 type RealtimeEventInput = {
@@ -130,6 +131,20 @@ class RtmpTtsAudioTap {
     }
 
     const reg = this.byInternal.get(meetingId);
+    const numericMeetingId = reg?.numericMeetingId ?? parseNumericMeetingId(meetingId);
+    if (numericMeetingId !== undefined) {
+      rtmpPcmTransportDebug.recordDeltaIngress({
+        meetingId: numericMeetingId,
+        meetingIdLabel: meetingId,
+        sessionId: input.sessionId,
+        type: input.type,
+        pcmBytes: pcm16.length,
+        deltaB64Length: deltaMeta.deltaB64Length,
+        tapExists: Boolean(reg),
+        publisherActive: reg ? rtmpTtsSessionManager.isActive(reg.numericMeetingId) : false
+      });
+    }
+
     if (!reg) {
       this.bufferPending(meetingId, pcm16, "tap_not_registered");
       return;
@@ -147,6 +162,7 @@ class RtmpTtsAudioTap {
    * Direct PCM ingress (smoke loop, tests) — does not parse Realtime delta JSON.
    * Keeps stdin open; does not stop the publisher.
    */
+  
   writePcm16Direct(
     numericMeetingId: number,
     pcm16: Buffer,

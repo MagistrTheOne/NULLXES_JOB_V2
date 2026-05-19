@@ -149,6 +149,8 @@ const envSchema = z.object({
    */
   RTMP_INGRESS_SMOKE_ENABLED: envBoolean(false),
   RTMP_INGRESS_SMOKE_INTERVAL_MS: z.coerce.number().int().min(3000).max(15_000).default(4500),
+  /** Forensic logs for realtime PCM → ffmpeg stdin (delta/write gaps, backpressure). */
+  RTMP_PCM_TRANSPORT_DEBUG: envBoolean(false),
   /** CHТЗ #2 — per-meeting ffmpeg RTMP listen → PCM → OpenAI Realtime STT. */
   RTMP_RECEIVER_ENABLED: envBoolean(false),
   RTMP_RECEIVER_PUBLIC_HOST: z.string().min(1).default("127.0.0.1"),
