@@ -387,6 +387,7 @@ export function createMeetingRouter(
           agentRTMPURLSource: resolvedAgentRtmp.source,
           hasAgentRTMPURL: rtmp.length > 0,
           rtmp: rtmp.length > 0 ? truncateRtmpUrl(rtmp) : undefined
+          
         },
         "control meeting start: resolved agent RTMP URL"
       );
@@ -416,12 +417,13 @@ export function createMeetingRouter(
             return;
           }
           try {
+            rtmpTtsAudioTap.register(internalId, input.meetingId);
             await rtmpTtsSessionManager.start({
               meetingId: input.meetingId,
               rtmpUrl: rtmp,
               recovered: true
             });
-            rtmpTtsAudioTap.register(internalId, input.meetingId);
+            rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_recovered");
             const recoveredSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
             const receiverActive = false;
             const recoveredRuntimeHealth = runtimeHealthFor({
@@ -574,11 +576,12 @@ export function createMeetingRouter(
         return;
       }
       try {
+        rtmpTtsAudioTap.register(internalId, input.meetingId);
         await rtmpTtsSessionManager.start({
           meetingId: input.meetingId,
           rtmpUrl: rtmp
         });
-        rtmpTtsAudioTap.register(internalId, input.meetingId);
+        rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_spawned");
         const publisherSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
         const receiverActive = false;
         const runtimeHealth = runtimeHealthFor({
@@ -950,7 +953,7 @@ export function createMeetingRouter(
     }
     res.status(423).json({
       error: "AdmissionAwaitingApproval",
-      message: "Кандидат уже подключен, ожидайте подтверждение HR.",
+      message: "Кандидат уже подключен, ожидайте подтверждение.",
       code: "admission.awaiting_approval",
       ...result.status
     });

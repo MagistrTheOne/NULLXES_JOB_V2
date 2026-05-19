@@ -7,12 +7,18 @@ import { logger } from "../logging/logger";
  * Gateway does not create ingress.
  * Gateway only consumes provided agentRTMPURL
  * and publishes AI audio through ffmpeg.
+ *
+ * Realtime contour: PCM chunks via stdin stay open for the whole meeting;
+ * stdin.end() is only called on explicit stop (not after each audio delta).
  */
 export interface RtmpTtsSession {
   meetingId: number;
   ffmpeg: ChildProcess;
   rtmpUrl: string;
   startedAt: number;
+  bytesWritten: number;
+  chunksWritten: number;
+  lastWriteAt?: number;
 }
 
 export type RtmpTtsSessionStatus =
@@ -47,12 +53,22 @@ export interface RtmpTtsSessionSnapshot {
   signal?: NodeJS.Signals | null;
   lastError?: string;
   lastStderr?: string;
+  bytesWritten?: number;
+  chunksWritten?: number;
+  lastWriteAt?: number;
 }
 
 export interface RtmpTtsPublisherExitEvent {
   meetingId: number;
   snapshot: RtmpTtsSessionSnapshot;
 }
+
+export type RtmpTtsWriteResult = {
+  written: boolean;
+  reason?: "no_session" | "no_stdin" | "empty_chunk" | "stdin_closed" | "write_failed";
+  totalBytesWritten: number;
+  chunksWritten: number;
+};
 
 /** Redact stream keys / credentials from RTMP URLs for logs. */
 export function truncateRtmpUrl(url: string): string {
@@ -109,7 +125,10 @@ class RtmpTtsSessionManager {
         pid: session.ffmpeg.pid,
         updatedAt: existing?.updatedAt ?? session.startedAt,
         lastStderr: existing?.lastStderr,
-        lastError: existing?.lastError
+        lastError: existing?.lastError,
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        lastWriteAt: session.lastWriteAt
       };
     }
     return (
@@ -170,7 +189,7 @@ class RtmpTtsSessionManager {
 
     let proc: ChildProcess;
     try {
-      proc = spawn(ffmpegPath, args, { stdio: ["pipe", "ignore", "pipe"] });
+      proc = spawn(ffmpegPath, args, { stdio: ["pipe", "pipe", "pipe"] });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.setSnapshot(input.meetingId, {
@@ -195,6 +214,15 @@ class RtmpTtsSessionManager {
         void this.stop(input.meetingId).finally(() => reject(new Error(message)));
       };
 
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString().trim();
+        if (!text) return;
+        logger.info(
+          { meetingId: input.meetingId, rtmp: rtmpSafe, ffmpegStdout: text.slice(0, 500) },
+          "rtmp tts ffmpeg stdout"
+        );
+      });
+
       proc.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         stderr += text;
@@ -204,7 +232,7 @@ class RtmpTtsSessionManager {
         this.mergeSnapshot(input.meetingId, {
           lastStderr: stderr.trim()
         });
-        logger.info({ meetingId: input.meetingId, rtmp: rtmpSafe, ffmpeg: text.trim() }, "rtmp tts ffmpeg");
+        logger.info({ meetingId: input.meetingId, rtmp: rtmpSafe, ffmpeg: text.trim() }, "rtmp tts ffmpeg stderr");
       });
 
       proc.on("error", (err) => {
@@ -216,18 +244,41 @@ class RtmpTtsSessionManager {
           lastError: err.message,
           lastStderr: stderr.trim() || undefined
         });
+        logger.error(
+          { meetingId: input.meetingId, rtmp: rtmpSafe, error: err.message },
+          "rtmp tts ffmpeg process error"
+        );
         fail(`ffmpeg spawn failed: ${err.message}`);
       });
 
-      proc.stdin?.on("error", () => {
-        /* expected when stdin is closed on stop */
+      proc.stdin?.on("error", (err: NodeJS.ErrnoException) => {
+        logger.warn(
+          {
+            meetingId: input.meetingId,
+            rtmp: rtmpSafe,
+            code: err.code,
+            error: err.message
+          },
+          "rtmp tts ffmpeg stdin error"
+        );
+      });
+
+      proc.stdin?.on("close", () => {
+        logger.info({ meetingId: input.meetingId, rtmp: rtmpSafe }, "rtmp tts ffmpeg stdin closed");
       });
 
       const startupTimer = setTimeout(() => {
         if (settled) return;
         settled = true;
         resolve();
-      }, 200);
+      }, 300);
+
+      proc.on("close", (code, signal) => {
+        logger.info(
+          { meetingId: input.meetingId, rtmp: rtmpSafe, code, signal, phase: settled ? "runtime" : "startup" },
+          "rtmp tts ffmpeg close"
+        );
+      });
 
       proc.on("exit", (code, signal) => {
         clearTimeout(startupTimer);
@@ -262,14 +313,25 @@ class RtmpTtsSessionManager {
             exitCode: code,
             pid: proc.pid,
             signal,
-            lastStderr: stderr.trim() || undefined
+            lastStderr: stderr.trim() || undefined,
+            bytesWritten: current.bytesWritten,
+            chunksWritten: current.chunksWritten,
+            lastWriteAt: current.lastWriteAt
           });
           this.notifyPublisherExit({
             meetingId: input.meetingId,
             snapshot: exitedSnapshot
           });
           logger.warn(
-            { meetingId: input.meetingId, rtmp: rtmpSafe, code, signal, ffmpeg: stderr.trim() || undefined },
+            {
+              meetingId: input.meetingId,
+              rtmp: rtmpSafe,
+              code,
+              signal,
+              bytesWritten: current.bytesWritten,
+              chunksWritten: current.chunksWritten,
+              ffmpeg: stderr.trim() || undefined
+            },
             "rtmp tts ffmpeg exited"
           );
         }
@@ -281,7 +343,9 @@ class RtmpTtsSessionManager {
       meetingId: input.meetingId,
       ffmpeg: proc,
       rtmpUrl: input.rtmpUrl,
-      startedAt
+      startedAt,
+      bytesWritten: 0,
+      chunksWritten: 0
     });
     this.setSnapshot(input.meetingId, {
       status: "spawned",
@@ -290,25 +354,74 @@ class RtmpTtsSessionManager {
       rtmpUrl: rtmpSafe,
       startedAt,
       pid: proc.pid,
-      lastStderr: stderr.trim() || undefined
+      lastStderr: stderr.trim() || undefined,
+      bytesWritten: 0,
+      chunksWritten: 0
     });
 
-    logger.info({ meetingId: input.meetingId, rtmp: rtmpSafe }, "rtmp tts ffmpeg started");
+    logger.info(
+      { meetingId: input.meetingId, rtmp: rtmpSafe, pid: proc.pid, recovered: Boolean(input.recovered) },
+      "rtmp tts ffmpeg started (stdin open for continuous pcm)"
+    );
   }
 
-  writePcm16(meetingId: number, chunk: Buffer): void {
+  writePcm16(meetingId: number, chunk: Buffer): RtmpTtsWriteResult {
     const session = this.sessions.get(meetingId);
-    const stdin = session?.ffmpeg.stdin;
+    if (!session) {
+      return { written: false, reason: "no_session", totalBytesWritten: 0, chunksWritten: 0 };
+    }
+    const stdin = session.ffmpeg.stdin;
     if (!stdin || chunk.length === 0) {
-      return;
+      return {
+        written: false,
+        reason: !stdin ? "no_stdin" : "empty_chunk",
+        totalBytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten
+      };
+    }
+    if (stdin.destroyed || stdin.writableEnded) {
+      return {
+        written: false,
+        reason: "stdin_closed",
+        totalBytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten
+      };
     }
     try {
       const ok = stdin.write(chunk);
       if (!ok) {
         stdin.once("drain", () => undefined);
       }
-    } catch {
-      /* stdin closed */
+      session.bytesWritten += chunk.length;
+      session.chunksWritten += 1;
+      session.lastWriteAt = Date.now();
+      this.mergeSnapshot(meetingId, {
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten,
+        lastWriteAt: session.lastWriteAt
+      });
+      return {
+        written: true,
+        totalBytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        {
+          meetingId,
+          error: message,
+          pcmBytes: chunk.length,
+          bytesWritten: session.bytesWritten
+        },
+        "rtmp tts ffmpeg stdin write failed"
+      );
+      return {
+        written: false,
+        reason: "write_failed",
+        totalBytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten
+      };
     }
   }
 
@@ -329,7 +442,10 @@ class RtmpTtsSessionManager {
       startedAt: session.startedAt,
       exitedAt: stoppedAt,
       pid: proc.pid,
-      updatedAt: stoppedAt
+      updatedAt: stoppedAt,
+      bytesWritten: session.bytesWritten,
+      chunksWritten: session.chunksWritten,
+      lastWriteAt: session.lastWriteAt
     });
     await new Promise<void>((resolve) => {
       const forceKill = setTimeout(() => {
@@ -367,7 +483,12 @@ class RtmpTtsSessionManager {
     });
 
     logger.info(
-      { meetingId, rtmp: truncateRtmpUrl(session.rtmpUrl) },
+      {
+        meetingId,
+        rtmp: truncateRtmpUrl(session.rtmpUrl),
+        bytesWritten: session.bytesWritten,
+        chunksWritten: session.chunksWritten
+      },
       "rtmp tts ffmpeg stopped"
     );
   }

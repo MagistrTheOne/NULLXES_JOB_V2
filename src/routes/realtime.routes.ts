@@ -5,7 +5,7 @@ import { logger } from "../logging/logger";
 import { HttpError } from "../middleware/errorHandler";
 import { OpenAIRealtimeClient } from "../services/openaiRealtimeClient";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
-import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
+import { inspectAudioDelta, rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
 import type { RuntimeEventStore } from "../services/runtimeEventStore";
 import { InMemorySessionStore } from "../services/sessionStore";
 import type { DataChannelEventPayload } from "../types/realtime";
@@ -301,8 +301,24 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
       event.type === "response.output_audio.delta" ||
       event.type === "output_audio.delta"
     ) {
+      const deltaMeta = inspectAudioDelta({
+        meetingId,
+        sessionId,
+        type: event.type,
+        rawPayload: event.rawPayload as Record<string, unknown>,
+        normalizedPayload: event.normalizedPayload as Record<string, unknown>
+      });
       logger.info(
-        { event: "openai_response_audio_delta_received", requestId: req.requestId, sessionId, meetingId },
+        {
+          event: "openai_response_audio_delta_received",
+          requestId: req.requestId,
+          sessionId,
+          meetingId,
+          type: event.type,
+          deltaExists: deltaMeta.deltaExists,
+          deltaB64Length: deltaMeta.deltaB64Length,
+          approxPcmBytes: deltaMeta.approxPcmBytes
+        },
         "openai_response_audio_delta_received"
       );
     }
