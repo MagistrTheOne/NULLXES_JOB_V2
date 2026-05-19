@@ -34,8 +34,14 @@ ffmpeg -hide_banner -loglevel info \
 |----------|---------|-------------|
 | `RTMP_INGRESS_ENABLED` | `true` | Set `false` to disable spawning ffmpeg |
 | `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg binary on the host |
-| `OPENAI_TTS_MODEL` | `gpt-4o-mini-tts` | Optional REST TTS model (live path uses Realtime deltas) |
-| `OPENAI_TTS_VOICE` | *(falls back to `OPENAI_REALTIME_VOICE`)* | Optional REST TTS voice |
+| `OPENAI_TTS_MODEL` | `gpt-4o-mini-tts` | REST TTS model for ingress smoke (`/audio/speech`, `response_format=pcm`) |
+| `OPENAI_TTS_VOICE` | *(falls back to `OPENAI_REALTIME_VOICE`)* | REST TTS voice for smoke |
+| `RTMP_INGRESS_SMOKE_ENABLED` | `false` | **TEMP** — after `publisher_spawned`, loop OpenAI speech PCM → ffmpeg stdin (no frontend) |
+| `RTMP_INGRESS_SMOKE_INTERVAL_MS` | `4500` | Tick interval for smoke loop (3–15 s) |
+
+### Ingress runtime smoke (TEMP)
+
+When `RTMP_INGRESS_SMOKE_ENABLED=true` and `RTMP_INGRESS_ENABLED=true`, after a successful publisher spawn the gateway calls OpenAI `POST /audio/speech` with `response_format=pcm` every ~4.5 s and writes PCM via `rtmpTtsAudioTap.writePcm16Direct` → `rtmpTtsSessionManager.writePcm16`. Stdin stays open; the publisher is not restarted between ticks. Logs: `rtmp_ingress_smoke_*`, `rtmp_tts_first_pcm_write`, snapshot `bytesWritten` / `chunksWritten` / `lastWriteAt` / `lastStderr`.
 
 `JOBAI_AI_AGENT_API_BASE_URL` is optional: when set, start may forward to JobAI AI-agent API; RTMP publish uses `agentRTMPURL` from the control request directly.
 

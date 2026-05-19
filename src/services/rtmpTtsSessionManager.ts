@@ -400,6 +400,21 @@ class RtmpTtsSessionManager {
         chunksWritten: session.chunksWritten,
         lastWriteAt: session.lastWriteAt
       });
+      if (session.chunksWritten === 1) {
+        const snap = this.getSnapshot(meetingId);
+        logger.info(
+          {
+            event: "rtmp_tts_first_pcm_write",
+            meetingId,
+            bytesWritten: session.bytesWritten,
+            chunksWritten: session.chunksWritten,
+            lastWriteAt: session.lastWriteAt,
+            ffmpegStderr: snap.lastStderr ?? null,
+            pid: snap.pid ?? null
+          },
+          "rtmp tts first pcm write to ffmpeg stdin"
+        );
+      }
       return {
         written: true,
         totalBytesWritten: session.bytesWritten,

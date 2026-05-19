@@ -143,6 +143,12 @@ const envSchema = z.object({
   AVATAR_VIDEO_DEGRADED_FALLBACK: z.enum(["static", "none"]).default("static"),
   /** CHТЗ #3 — OpenAI Realtime assistant PCM → ffmpeg → RTMP (LiveKit ingress URL from POST /meetings/start). */
   RTMP_INGRESS_ENABLED: envBoolean(true),
+  /**
+   * TEMP: after publisher_spawned, loop OpenAI /audio/speech (pcm) → ffmpeg stdin for ingress E2E smoke.
+   * Does not close stdin or stop publisher between ticks.
+   */
+  RTMP_INGRESS_SMOKE_ENABLED: envBoolean(false),
+  RTMP_INGRESS_SMOKE_INTERVAL_MS: z.coerce.number().int().min(3000).max(15_000).default(4500),
   /** CHТЗ #2 — per-meeting ffmpeg RTMP listen → PCM → OpenAI Realtime STT. */
   RTMP_RECEIVER_ENABLED: envBoolean(false),
   RTMP_RECEIVER_PUBLIC_HOST: z.string().min(1).default("127.0.0.1"),
@@ -267,7 +273,7 @@ const envSchema = z.object({
       message: "A2F_GPU_RUNTIME_WS_URL is required when A2F_RUNTIME_TRANSPORT=gpu_pod"
     });
   }
-
+//Ссылка на CHTZ-2-RTMP-RECEIVER-STT.md <= Документация ЧТЗ.(#Нейронка писала кекаю)
   if (values.RTMP_RECEIVER_PORT_START > values.RTMP_RECEIVER_PORT_END) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -275,7 +281,9 @@ const envSchema = z.object({
       message: "RTMP_RECEIVER_PORT_START must be <= RTMP_RECEIVER_PORT_END"
     });
   }
-
+// А вот тут уже логика Стримов для загрузки аватара в рантайм систему.
+// Это нужно для того, чтобы аватар загружался в рантайм систему.
+//const JUNAI=LOOSER
   const runtimeEngine = values.VIDEO_ENGINE !== "none" ? values.VIDEO_ENGINE : values.VIDEO_MODEL;
   if (
     ["arachne", "arachne_ultra_avatar", "arachne_ultra_video", "nullxes", "longcat", "core"].includes(runtimeEngine) &&
@@ -339,3 +347,5 @@ export function resolveAvatarInferenceServiceKey(): string | undefined {
     undefined
   );
 }
+
+//архитектор != человек который печатает быстрее всех @ MagistrTheOne @NULLXES

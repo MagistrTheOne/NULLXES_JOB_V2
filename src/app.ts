@@ -48,6 +48,7 @@ import { MeetingOrchestrator } from "./services/meetingOrchestrator";
 import { AvatarRuntimeSessionManager } from "./services/avatarRuntimeSessionManager";
 import { MeetingControlWsHub } from "./services/meetingControlWsHub";
 import { rtmpSttBridge } from "./services/rtmpSttBridge";
+import { rtmpIngressSmokeLoop } from "./services/rtmpIngressSmokeLoop";
 import { rtmpTtsSessionManager } from "./services/rtmpTtsSessionManager";
 import { MeetingStateMachine } from "./services/meetingStateMachine";
 import { OpenAIRealtimeClient } from "./services/openaiRealtimeClient";
@@ -214,6 +215,7 @@ export async function createApp(): Promise<AppContext> {
     }
   }
   rtmpTtsSessionManager.onPublisherExit(({ meetingId: numericMeetingId, snapshot }) => {
+    rtmpIngressSmokeLoop.stop(numericMeetingId, "publisher_exited");
     const internalId = `nullxes-meeting-${numericMeetingId}`;
     const meeting = meetingOrchestrator.tryGetMeeting(internalId);
     if (!meeting || meeting.status !== "in_meeting") {

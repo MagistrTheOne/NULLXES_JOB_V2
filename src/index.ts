@@ -1,6 +1,7 @@
 import { env } from "./config/env";
 import { logger } from "./logging/logger";
 import { createApp } from "./app";
+import { rtmpIngressSmokeLoop } from "./services/rtmpIngressSmokeLoop";
 
 async function main(): Promise<void> {
   const { app, sessionStore, webhookDispatcher, postMeetingProcessor, meetingControlWsHub, a2fFrameWsHub, storage } =
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, "graceful shutdown started");
+    rtmpIngressSmokeLoop.stopAll("shutdown");
     sessionStore.stopSweeper();
     webhookDispatcher.stop();
     postMeetingProcessor.stop();

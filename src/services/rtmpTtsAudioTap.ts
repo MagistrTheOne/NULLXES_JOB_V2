@@ -1,5 +1,5 @@
 import { logger } from "../logging/logger";
-import { rtmpTtsSessionManager } from "./rtmpTtsSessionManager";
+import { rtmpTtsSessionManager, type RtmpTtsWriteResult } from "./rtmpTtsSessionManager";
 
 type RealtimeEventInput = {
   meetingId?: string;
@@ -143,29 +143,53 @@ class RtmpTtsAudioTap {
     this.writePcm16(reg.numericMeetingId, pcm16, meetingId);
   }
 
-  private writePcm16(numericMeetingId: number, pcm16: Buffer, meetingIdForLog: string): void {
+  /**
+   * Direct PCM ingress (smoke loop, tests) — does not parse Realtime delta JSON.
+   * Keeps stdin open; does not stop the publisher.
+   */
+  writePcm16Direct(
+    numericMeetingId: number,
+    pcm16: Buffer,
+    meta?: { source?: string; phrase?: string }
+  ): RtmpTtsWriteResult {
+    return this.writePcm16(numericMeetingId, pcm16, String(numericMeetingId), meta);
+  }
+
+  private writePcm16(
+    numericMeetingId: number,
+    pcm16: Buffer,
+    meetingIdForLog: string,
+    meta?: { source?: string; phrase?: string }
+  ): RtmpTtsWriteResult {
     const result = rtmpTtsSessionManager.writePcm16(numericMeetingId, pcm16);
     const logKey = String(numericMeetingId);
     const count = (this.deltaLogCounters.get(logKey) ?? 0) + 1;
     this.deltaLogCounters.set(logKey, count);
 
-    if (count === 1 || count % 50 === 0 || !result.written) {
+    const snapshot = rtmpTtsSessionManager.getSnapshot(numericMeetingId);
+    const logEverySmoke = meta?.source === "rtmp_ingress_smoke";
+    if (count === 1 || count % 50 === 0 || !result.written || logEverySmoke) {
       logger.info(
         {
-          event: "rtmp_tts_write_pcm",
+          event: meta?.source === "rtmp_ingress_smoke" ? "rtmp_ingress_smoke_write_pcm" : "rtmp_tts_write_pcm",
           meetingId: meetingIdForLog,
           numericMeetingId,
           pcmBytes: pcm16.length,
+          phrase: meta?.phrase,
+          source: meta?.source,
           tapExists: this.byInternal.has(meetingIdForLog) || this.byInternal.has(String(numericMeetingId)),
           publisherActive: rtmpTtsSessionManager.isActive(numericMeetingId),
           written: result.written,
           reason: result.reason,
           totalBytesWritten: result.totalBytesWritten,
-          chunksWritten: result.chunksWritten
+          chunksWritten: result.chunksWritten,
+          lastWriteAt: snapshot.lastWriteAt ?? null,
+          ffmpegStderr: snapshot.lastStderr ?? null
         },
         result.written ? "rtmp tts write pcm" : "rtmp tts write pcm skipped"
       );
     }
+    return result;
   }
 
   private bufferPending(meetingId: string, pcm16: Buffer, reason: string): void {

@@ -12,6 +12,7 @@ import type { MeetingControlWsHub } from "../services/meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
 import { rtmpSttBridge } from "../services/rtmpSttBridge";
 import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
+import { rtmpIngressSmokeLoop } from "../services/rtmpIngressSmokeLoop";
 import { rtmpTtsSessionManager, truncateRtmpUrl, type RtmpTtsSessionSnapshot } from "../services/rtmpTtsSessionManager";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
 import type { FailMeetingInput, MeetingRecord, StartMeetingInput, StopMeetingInput } from "../types/meeting";
@@ -424,6 +425,7 @@ export function createMeetingRouter(
               recovered: true
             });
             rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_recovered");
+            rtmpIngressSmokeLoop.start(input.meetingId, "publisher_recovered");
             const recoveredSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
             const receiverActive = false;
             const recoveredRuntimeHealth = runtimeHealthFor({
@@ -582,6 +584,7 @@ export function createMeetingRouter(
           rtmpUrl: rtmp
         });
         rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_spawned");
+        rtmpIngressSmokeLoop.start(input.meetingId, "publisher_spawned");
         const publisherSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
         const receiverActive = false;
         const runtimeHealth = runtimeHealthFor({
@@ -749,6 +752,7 @@ export function createMeetingRouter(
       actor: "nullxes_control_api",
       payload: { numericMeetingId: input.meetingId, stopReason: input.stopReason }
     }).catch(() => undefined);
+    rtmpIngressSmokeLoop.stop(input.meetingId, "meeting_stopped");
     rtmpTtsAudioTap.unregister(internalId);
     await rtmpTtsSessionManager.stop(input.meetingId);
     await rtmpSttBridge.stop(input.meetingId);
