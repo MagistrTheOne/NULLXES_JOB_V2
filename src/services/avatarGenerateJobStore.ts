@@ -12,23 +12,16 @@ export type AvatarGenerateJobRecord = {
   state: AvatarGenerateJobState;
   createdAtMs: number;
   updatedAtMs: number;
-  /** ISO 8601 — session start (enqueue). */
   startedAt?: string;
-  /** ISO 8601 — first transition to `processing`. */
   processingStartedAt?: string;
-  /** ISO 8601 — terminal success. */
   completedAt?: string;
-  /** ISO 8601 — terminal failure. */
   failedAt?: string;
-  /** Number of failed RunPod attempts before success or final failure (0 = first attempt only). */
   retryCount: number;
   prompt: string;
   errorMessage?: string;
-  /** Absolute public URL to the generated video (orchestrator-built from RUNPOD_RUNTIME_URL + result[0]). */
   videoUrl?: string;
   /** @deprecated Prefer `videoUrl`; kept for older clients. */
   resultVideoUrl?: string;
-  /** Raw JSON from GPU when useful for debugging. */
   resultPayload?: unknown;
 };
 

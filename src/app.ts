@@ -26,6 +26,7 @@ import { createJobaiWebrtcProxyRouter } from "./routes/jobaiWebrtcProxy.routes";
 import { createMeetingRouter } from "./routes/meeting.routes";
 import { createRealtimeRouter } from "./routes/realtime.routes";
 import { createOrchestratedRealtimeRouter } from "./routes/orchestratedRealtime.routes";
+import { createVoiceRouter } from "./routes/voice.routes";
 import { createRuntimeRouter } from "./routes/runtime.routes";
 import { createLiveKitRouter } from "./routes/livekit.routes";
 import { AvatarClient } from "./services/avatarClient";
@@ -48,6 +49,7 @@ import { MeetingOrchestrator } from "./services/meetingOrchestrator";
 import { AvatarRuntimeSessionManager } from "./services/avatarRuntimeSessionManager";
 import { MeetingControlWsHub } from "./services/meetingControlWsHub";
 import { rtmpSttBridge } from "./services/rtmpSttBridge";
+import { stagedVoiceTurnRuntime } from "./services/stagedVoiceTurnRuntime";
 import { rtmpIngressSmokeLoop } from "./services/rtmpIngressSmokeLoop";
 import { rtmpTtsSessionManager } from "./services/rtmpTtsSessionManager";
 import { MeetingStateMachine } from "./services/meetingStateMachine";
@@ -143,6 +145,19 @@ export async function createApp(): Promise<AppContext> {
     avatarRuntimeSessionManager.resume(internalMeetingId);
   });
   avatarRuntimeSessionManager.startSweeper();
+
+  if (env.VOICE_MODE === "staged") {
+    stagedVoiceTurnRuntime.onTtsPcm16(({ meetingId, pcm16, sampleRateHz, timestampMs }) => {
+      avatarRuntimeSessionManager.ingestStagedTtsPcm16(meetingId, {
+        pcm16,
+        sampleRateHz,
+        timestampMs
+      });
+    });
+    logger.info({ voiceMode: env.VOICE_MODE }, "staged voice pipeline enabled");
+  } else {
+    logger.info({ voiceMode: env.VOICE_MODE }, "realtime voice pipeline (legacy)");
+  }
   const avatarClient = new AvatarClient();
   const avatarStateStore =
     env.STORAGE_BACKEND === "redis" && storage.redis
@@ -340,7 +355,8 @@ export async function createApp(): Promise<AppContext> {
     res.status(200).json({
       status: "ok",
       uptimeSeconds: process.uptime(),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      voiceMode: env.VOICE_MODE
     });
   });
 
@@ -390,6 +406,11 @@ export async function createApp(): Promise<AppContext> {
     }),
     createOrchestratedRealtimeRouter({
       runtimeEvents
+    }),
+    createVoiceRouter({
+      runtimeEvents,
+      controlWsHub: meetingControlWsHub,
+      interviews: interviewService
     })
   );
 

@@ -3,17 +3,22 @@ import { logger } from "../logging/logger";
 import type { MeetingControlWsHub } from "./meetingControlWsHub";
 import { OpenAiRealtimeWsSttClient } from "./openaiRealtimeWsSttClient";
 import { rtmpReceiverSessionManager } from "./rtmpReceiverSessionManager";
+import { stagedVoiceTurnRuntime } from "./stagedVoiceTurnRuntime";
 import type { RuntimeEventStore } from "./runtimeEventStore";
+import type { DialogueInterviewContext } from "./dialogueStateStore";
 
 const PCM_CHUNK_TARGET_BYTES = 4800; // ~100 ms @ 24 kHz mono s16le
+const RTMP_PCM_SAMPLE_RATE_HZ = 24_000;
 
 type BridgeSession = {
   numericMeetingId: number;
   internalMeetingId: string;
-  sttClient: OpenAiRealtimeWsSttClient;
+  mode: "realtime_ws" | "staged";
+  sttClient?: OpenAiRealtimeWsSttClient;
   pcmUnsub: () => void;
   pcmBuffer: Buffer;
   paused: boolean;
+  sessionId: string;
 };
 
 class RtmpSttBridge {
@@ -32,6 +37,7 @@ class RtmpSttBridge {
     internalMeetingId: string;
     controlWsHub?: MeetingControlWsHub;
     runtimeEvents?: RuntimeEventStore;
+    dialogueContext?: DialogueInterviewContext;
   }): Promise<{ agentReceiverRTMPURL: string }> {
     if (!this.isEnabled()) {
       throw new Error("rtmp_stt_disabled");
@@ -40,35 +46,54 @@ class RtmpSttBridge {
     await this.stop(input.numericMeetingId);
 
     const receiver = await rtmpReceiverSessionManager.start({ meetingId: input.numericMeetingId });
+    const sessionId = `${input.internalMeetingId}-rtmp`;
+    const useStaged = env.VOICE_MODE === "staged";
 
-    const sttClient = new OpenAiRealtimeWsSttClient(input.numericMeetingId, {
-      onTranscriptDelta: (delta) => {
-        input.controlWsHub?.publishSubtitlesDelta(input.numericMeetingId, delta);
-        void input.runtimeEvents
-          ?.append({
-            type: "rtmp.stt.transcript_delta",
-            meetingId: input.internalMeetingId,
-            actor: "openai",
-            payload: { numericMeetingId: input.numericMeetingId, chars: delta.length }
-          })
-          .catch(() => undefined);
-        logger.debug({ meetingId: input.numericMeetingId, delta: delta.slice(0, 80) }, "rtmp stt transcript delta");
-      },
-      onSpeechStarted: () => {
-        input.controlWsHub?.publishActivityMode(input.numericMeetingId, "candidate", "speaking");
-      },
-      onSpeechStopped: () => {
-        input.controlWsHub?.publishActivityMode(input.numericMeetingId, "candidate", "listening");
-      },
-      onError: (message) => {
-        logger.warn({ meetingId: input.numericMeetingId, message }, "rtmp stt openai ws error");
-      }
-    });
+    if (useStaged) {
+      stagedVoiceTurnRuntime.start({
+        meetingId: input.internalMeetingId,
+        sessionId,
+        numericMeetingId: input.numericMeetingId,
+        sampleRateHz: RTMP_PCM_SAMPLE_RATE_HZ,
+        dialogueContext: input.dialogueContext,
+        controlWsHub: input.controlWsHub,
+        runtimeEvents: input.runtimeEvents
+      });
+    }
+
+    let sttClient: OpenAiRealtimeWsSttClient | undefined;
+    if (!useStaged) {
+      sttClient = new OpenAiRealtimeWsSttClient(input.numericMeetingId, {
+        onTranscriptDelta: (delta) => {
+          input.controlWsHub?.publishSubtitlesDelta(input.numericMeetingId, delta);
+          void input.runtimeEvents
+            ?.append({
+              type: "rtmp.stt.transcript_delta",
+              meetingId: input.internalMeetingId,
+              actor: "openai",
+              payload: { numericMeetingId: input.numericMeetingId, chars: delta.length }
+            })
+            .catch(() => undefined);
+          logger.debug({ meetingId: input.numericMeetingId, delta: delta.slice(0, 80) }, "rtmp stt transcript delta");
+        },
+        onSpeechStarted: () => {
+          input.controlWsHub?.publishActivityMode(input.numericMeetingId, "candidate", "speaking");
+        },
+        onSpeechStopped: () => {
+          input.controlWsHub?.publishActivityMode(input.numericMeetingId, "candidate", "listening");
+        },
+        onError: (message) => {
+          logger.warn({ meetingId: input.numericMeetingId, message }, "rtmp stt openai ws error");
+        }
+      });
+    }
 
     const session: BridgeSession = {
       numericMeetingId: input.numericMeetingId,
       internalMeetingId: input.internalMeetingId,
+      mode: useStaged ? "staged" : "realtime_ws",
       sttClient,
+      sessionId,
       pcmUnsub: rtmpReceiverSessionManager.onPcm(input.numericMeetingId, (chunk) => {
         this.ingestPcm(input.numericMeetingId, chunk);
       }),
@@ -77,28 +102,36 @@ class RtmpSttBridge {
     };
     this.sessions.set(input.numericMeetingId, session);
 
-    try {
-      await sttClient.connect();
-    } catch (err: unknown) {
-      await this.stop(input.numericMeetingId);
-      throw err;
+    if (sttClient) {
+      try {
+        await sttClient.connect();
+      } catch (err: unknown) {
+        await this.stop(input.numericMeetingId);
+        throw err;
+      }
     }
 
     void input.runtimeEvents
       ?.append({
-        type: "rtmp.stt.started",
+        type: useStaged ? "voice.rtmp.receiver.started" : "rtmp.stt.started",
         meetingId: input.internalMeetingId,
         actor: "gateway",
         payload: {
           numericMeetingId: input.numericMeetingId,
-          agentReceiverRTMPURL: receiver.agentReceiverRTMPURL
+          agentReceiverRTMPURL: receiver.agentReceiverRTMPURL,
+          voiceMode: env.VOICE_MODE
         }
       })
       .catch(() => undefined);
 
     logger.info(
-      { meetingId: input.numericMeetingId, agentReceiverRTMPURL: receiver.agentReceiverRTMPURL },
-      "rtmp stt bridge started"
+      {
+        meetingId: input.numericMeetingId,
+        agentReceiverRTMPURL: receiver.agentReceiverRTMPURL,
+        voiceMode: env.VOICE_MODE,
+        bridgeMode: session.mode
+      },
+      "rtmp receiver bridge started"
     );
 
     return { agentReceiverRTMPURL: receiver.agentReceiverRTMPURL };
@@ -110,6 +143,11 @@ class RtmpSttBridge {
       return;
     }
 
+    if (session.mode === "staged") {
+      stagedVoiceTurnRuntime.appendMicPcm16(session.internalMeetingId, chunk, Date.now());
+      return;
+    }
+
     session.pcmBuffer = session.pcmBuffer.length
       ? Buffer.concat([session.pcmBuffer, chunk])
       : Buffer.from(chunk);
@@ -117,7 +155,7 @@ class RtmpSttBridge {
     while (session.pcmBuffer.length >= PCM_CHUNK_TARGET_BYTES) {
       const slice = session.pcmBuffer.subarray(0, PCM_CHUNK_TARGET_BYTES);
       session.pcmBuffer = session.pcmBuffer.subarray(PCM_CHUNK_TARGET_BYTES);
-      session.sttClient.appendPcm16(slice);
+      session.sttClient?.appendPcm16(slice);
     }
   }
 
@@ -127,10 +165,10 @@ class RtmpSttBridge {
       return;
     }
     session.paused = pauseEnabled;
-    session.sttClient.setPaused(pauseEnabled);
-    if (!pauseEnabled) {
+    session.sttClient?.setPaused(pauseEnabled);
+    if (!pauseEnabled && session.mode === "realtime_ws") {
       if (session.pcmBuffer.length > 0) {
-        session.sttClient.appendPcm16(session.pcmBuffer);
+        session.sttClient?.appendPcm16(session.pcmBuffer);
         session.pcmBuffer = Buffer.alloc(0);
       }
     }
@@ -145,9 +183,12 @@ class RtmpSttBridge {
 
     this.sessions.delete(numericMeetingId);
     session.pcmUnsub();
-    session.sttClient.close();
+    session.sttClient?.close();
+    if (session.mode === "staged") {
+      stagedVoiceTurnRuntime.close(session.internalMeetingId);
+    }
     await rtmpReceiverSessionManager.stop(numericMeetingId);
-    logger.info({ meetingId: numericMeetingId }, "rtmp stt bridge stopped");
+    logger.info({ meetingId: numericMeetingId, mode: session.mode }, "rtmp receiver bridge stopped");
   }
 }
 

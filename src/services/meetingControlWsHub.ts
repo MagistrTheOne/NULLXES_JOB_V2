@@ -24,6 +24,21 @@ type ControlWsEvent =
   | {
       eventType: "subtitles_delta";
       text: string;
+    }
+  | {
+      eventType: "voice_turn_started";
+      turnId: string;
+      source?: string;
+    }
+  | {
+      eventType: "voice_transcript_final";
+      turnId: string;
+      text: string;
+    }
+  | {
+      eventType: "voice_agent_text";
+      turnId: string;
+      text: string;
     };
 
 export type MeetingControlActivityRole = "candidate" | "ai_agent";
@@ -141,6 +156,26 @@ export class MeetingControlWsHub {
       actor: "gateway",
       payload: { numericMeetingId: meetingId, value }
     }).catch(() => undefined);
+  }
+
+  publishVoiceTurnStarted(meetingId: number, turnId: string, source?: string): void {
+    this.broadcast(meetingId, { eventType: "voice_turn_started", turnId, source });
+  }
+
+  publishVoiceTranscriptFinal(meetingId: number, turnId: string, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    this.broadcast(meetingId, { eventType: "voice_transcript_final", turnId, text: trimmed });
+  }
+
+  publishVoiceAgentText(meetingId: number, turnId: string, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    this.broadcast(meetingId, { eventType: "voice_agent_text", turnId, text: trimmed });
   }
 
   publishSubtitlesDelta(meetingId: number, text: string): void {

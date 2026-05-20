@@ -7,6 +7,7 @@ import type { MeetingControlWsHub } from "./meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "./avatarRuntimeSessionManager";
 import { rtmpIngressSmokeLoop } from "./rtmpIngressSmokeLoop";
 import { rtmpSttBridge } from "./rtmpSttBridge";
+import { stagedVoiceTurnRuntime } from "./stagedVoiceTurnRuntime";
 import { rtmpTtsAudioTap } from "./rtmpTtsAudioTap";
 import { rtmpTtsSessionManager } from "./rtmpTtsSessionManager";
 import type { RuntimeEventStore } from "./runtimeEventStore";
@@ -75,6 +76,7 @@ export function createMeetingDeinitRunner(deps: MeetingDeinitRunnerDeps): {
         }
         rtmpIngressSmokeLoop.stop(numericMeetingId, "meeting_deinit");
         rtmpTtsAudioTap.unregisterByNumeric(numericMeetingId);
+        stagedVoiceTurnRuntime.close(internalId);
         await rtmpTtsSessionManager.stop(numericMeetingId);
         await rtmpSttBridge.stop(numericMeetingId);
         deps.avatarRuntime?.stop(internalId, stopReason);

@@ -172,11 +172,19 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
       sessionId,
       token: token.value,
       expiresAt: token.expiresAt,
-      session: sessionConfig
+      session: sessionConfig,
+      voiceMode: env.VOICE_MODE
     });
   }));
 
   router.post("/session", sdpBodyParser, asyncHandler(async (req: Request, res: Response) => {
+    if (env.VOICE_MODE === "staged") {
+      throw new HttpError(
+        410,
+        "realtime_webrtc_session_deprecated_use_staged_voice",
+        { voiceMode: env.VOICE_MODE, voiceApi: "/realtime/voice" }
+      );
+    }
     const offerSdp = validateSdpPayload(req);
     const sessionId = uuidv4();
 
@@ -245,8 +253,10 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
       normalizedPayload: event.normalizedPayload as Record<string, unknown>,
       timestampMs: typeof event.timestampMs === "number" ? event.timestampMs : undefined
     };
-    deps.avatarRuntime?.handleRealtimeEvent(realtimeEvent);
-    rtmpTtsAudioTap.handleRealtimeEvent(realtimeEvent);
+    if (env.VOICE_MODE === "realtime") {
+      deps.avatarRuntime?.handleRealtimeEvent(realtimeEvent);
+      rtmpTtsAudioTap.handleRealtimeEvent(realtimeEvent);
+    }
     void deps.runtimeEvents?.append({
       type: "realtime.session.event",
       meetingId,
@@ -301,24 +311,8 @@ export function createRealtimeRouter(deps: RealtimeRouterDeps): express.Router {
       event.type === "response.output_audio.delta" ||
       event.type === "output_audio.delta"
     ) {
-      const deltaMeta = inspectAudioDelta({
-        meetingId,
-        sessionId,
-        type: event.type,
-        rawPayload: event.rawPayload as Record<string, unknown>,
-        normalizedPayload: event.normalizedPayload as Record<string, unknown>
-      });
       logger.info(
-        {
-          event: "openai_response_audio_delta_received",
-          requestId: req.requestId,
-          sessionId,
-          meetingId,
-          type: event.type,
-          deltaExists: deltaMeta.deltaExists,
-          deltaB64Length: deltaMeta.deltaB64Length,
-          approxPcmBytes: deltaMeta.approxPcmBytes
-        },
+        { event: "openai_response_audio_delta_received", requestId: req.requestId, sessionId, meetingId },
         "openai_response_audio_delta_received"
       );
     }

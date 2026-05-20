@@ -30,6 +30,25 @@ const envSchema = z.object({
   OPENAI_TURN_DETECTION_THRESHOLD: z.coerce.number().min(0).max(1).default(0.72),
   OPENAI_TURN_DETECTION_PREFIX_PADDING_MS: z.coerce.number().int().min(0).default(450),
   OPENAI_TURN_DETECTION_SILENCE_DURATION_MS: z.coerce.number().int().min(100).default(900),
+  /**
+   * Voice dialogue pipeline: `realtime` = OpenAI Realtime speech-to-speech (legacy WebRTC);
+   * `staged` = Speech-to-text → Responses → Text-to-speech on gateway.
+   */
+  VOICE_MODE: z.enum(["realtime", "staged"]).default("staged"),
+  /** REST POST /audio/transcriptions model (staged STT leg). */
+  OPENAI_STT_TRANSCRIPTION_MODEL: z.string().default("gpt-4o-mini-transcribe"),
+  /** REST POST /v1/responses model (staged LLM leg). */
+  OPENAI_LLM_MODEL: z.string().default("gpt-4.1-mini"),
+  /** Gateway-side VAD: minimum speech before a turn can end (ms). */
+  TURN_VAD_MIN_SPEECH_MS: z.coerce.number().int().min(100).default(400),
+  /** Gateway-side VAD: silence after speech to commit turn (ms). Reuses turn-detection default if unset. */
+  TURN_VAD_SILENCE_MS: z.coerce.number().int().min(200).default(900),
+  /** Max PCM bytes buffered per meeting while waiting for turn commit. */
+  VOICE_PCM_BUFFER_MAX_BYTES: z.coerce.number().int().positive().default(4 * 1024 * 1024),
+  /** Max turn audio length sent to STT (seconds). */
+  STT_MAX_TURN_SECONDS: z.coerce.number().int().min(1).max(120).default(60),
+  /** RMS threshold (s16le mono) for gateway VAD speech detection. */
+  VOICE_VAD_RMS_THRESHOLD: z.coerce.number().int().min(50).default(800),
   SESSION_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
   SESSION_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(30000),
   SDP_MAX_BYTES: z.coerce.number().int().positive().default(200000),

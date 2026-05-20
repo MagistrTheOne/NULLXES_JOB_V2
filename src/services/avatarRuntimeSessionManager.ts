@@ -347,6 +347,21 @@ export class AvatarRuntimeSessionManager {
     }
   }
 
+  /** Staged voice pipeline TTS PCM (24 kHz) — same downstream as Realtime audio deltas. */
+  ingestStagedTtsPcm16(
+    meetingId: string,
+    input: { pcm16: Buffer; sampleRateHz: number; timestampMs: number }
+  ): void {
+    if (env.VOICE_MODE !== "staged") {
+      return;
+    }
+    this.ingestOpenAiAudioDelta(meetingId, {
+      pcm16Base64: input.pcm16.toString("base64"),
+      sampleRateHz: input.sampleRateHz,
+      timestampMs: input.timestampMs
+    });
+  }
+
   ingestOpenAiAudioDelta(
     meetingId: string,
     input: { pcm16Base64: string; sampleRateHz: number; timestampMs: number }

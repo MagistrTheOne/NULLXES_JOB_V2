@@ -12,6 +12,8 @@ import type { MeetingControlWsHub } from "../services/meetingControlWsHub";
 import type { AvatarRuntimeSessionManager } from "../services/avatarRuntimeSessionManager";
 import { rtmpSttBridge } from "../services/rtmpSttBridge";
 import { rtmpTtsAudioTap } from "../services/rtmpTtsAudioTap";
+import { stagedVoiceTurnRuntime } from "../services/stagedVoiceTurnRuntime";
+import type { DialogueInterviewContext } from "../services/dialogueStateStore";
 import { rtmpIngressSmokeLoop } from "../services/rtmpIngressSmokeLoop";
 import { rtmpTtsSessionManager, truncateRtmpUrl, type RtmpTtsSessionSnapshot } from "../services/rtmpTtsSessionManager";
 import type { MeetingCandidatePresenceTracker } from "../services/meetingCandidatePresence";
@@ -61,8 +63,72 @@ const controlStartMeetingSchema = z.object({
  * Receiver/STT bridge lifecycle is intentionally disabled
  * until duplex realtime contour is required.
  */
-const ENABLE_RTMP_RECEIVER = false;
+const ENABLE_RTMP_RECEIVER = env.VOICE_MODE === "staged" && env.RTMP_RECEIVER_ENABLED;
 const STUB_AGENT_RECEIVER_RTMP_URL = "stub://receiver-disabled";
+
+function registerRtmpTtsTapIfRealtime(internalId: string, numericMeetingId: number): void {
+  if (env.VOICE_MODE === "realtime") {
+    rtmpTtsAudioTap.register(internalId, numericMeetingId);
+  }
+}
+
+function unregisterRtmpTtsTapIfRealtime(internalId: string): void {
+  if (env.VOICE_MODE === "realtime") {
+    rtmpTtsAudioTap.unregister(internalId);
+  }
+}
+
+function flushRtmpTtsTapIfRealtime(numericMeetingId: number, reason: string): void {
+  if (env.VOICE_MODE === "realtime") {
+    rtmpTtsAudioTap.flushPending(numericMeetingId, reason);
+  }
+}
+
+function dialogueContextFromStored(stored: StoredInterview): DialogueInterviewContext {
+  const raw = stored.rawPayload;
+  return {
+    candidateFirstName: raw.candidateFirstName,
+    candidateLastName: raw.candidateLastName,
+    companyName: raw.companyName,
+    jobTitle: raw.jobTitle,
+    vacancyText: raw.vacancyText,
+    specialtyName: raw.specialty?.name,
+    greetingSpeech: raw.greetingSpeech,
+    finalSpeech: raw.finalSpeech,
+    questions: raw.specialty?.questions?.map((q) => ({ text: q.text, order: q.order }))
+  };
+}
+
+function startStagedVoiceForMeeting(input: {
+  internalId: string;
+  numericMeetingId: number;
+  stored: StoredInterview;
+  controlWsHub?: MeetingControlWsHub;
+  runtimeEvents?: RuntimeEventStore;
+}): void {
+  if (env.VOICE_MODE !== "staged") {
+    return;
+  }
+  const sessionId = input.stored.projection.sessionId ?? input.internalId;
+  stagedVoiceTurnRuntime.start({
+    meetingId: input.internalId,
+    sessionId,
+    numericMeetingId: input.numericMeetingId,
+    sampleRateHz: 16_000,
+    dialogueContext: dialogueContextFromStored(input.stored),
+    controlWsHub: input.controlWsHub,
+    runtimeEvents: input.runtimeEvents
+  });
+  void stagedVoiceTurnRuntime.agentSpeak(input.internalId).catch((err: unknown) => {
+    logger.warn(
+      {
+        meetingId: input.internalId,
+        error: err instanceof Error ? err.message : String(err)
+      },
+      "staged voice greeting speak failed"
+    );
+  });
+}
 
 function normalizeControlStopMeetingBody(body: unknown): unknown {
   if (!body || typeof body !== "object") {
@@ -418,13 +484,20 @@ export function createMeetingRouter(
             return;
           }
           try {
-            rtmpTtsAudioTap.register(internalId, input.meetingId);
+            registerRtmpTtsTapIfRealtime(internalId, input.meetingId);
             await rtmpTtsSessionManager.start({
               meetingId: input.meetingId,
               rtmpUrl: rtmp,
               recovered: true
             });
-            rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_recovered");
+            flushRtmpTtsTapIfRealtime(input.meetingId, "publisher_recovered");
+            startStagedVoiceForMeeting({
+              internalId,
+              numericMeetingId: input.meetingId,
+              stored,
+              controlWsHub: deps.controlWsHub,
+              runtimeEvents: deps.runtimeEvents
+            });
             rtmpIngressSmokeLoop.start(input.meetingId, "publisher_recovered");
             const recoveredSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
             const receiverActive = false;
@@ -478,7 +551,7 @@ export function createMeetingRouter(
             });
             return;
           } catch (err: unknown) {
-            rtmpTtsAudioTap.unregister(internalId);
+            unregisterRtmpTtsTapIfRealtime(internalId);
             logger.warn(
               { meetingId: input.meetingId, internalId, error: err instanceof Error ? err.message : String(err) },
               "rtmp tts recovery failed"
@@ -543,7 +616,8 @@ export function createMeetingRouter(
             numericMeetingId: input.meetingId,
             internalMeetingId: internalId,
             controlWsHub: deps.controlWsHub,
-            runtimeEvents: deps.runtimeEvents
+            runtimeEvents: deps.runtimeEvents,
+            dialogueContext: dialogueContextFromStored(stored)
           });
           agentReceiverRTMPURL = out.agentReceiverRTMPURL;
           metadata.agentReceiverRTMPURL = agentReceiverRTMPURL;
@@ -578,13 +652,22 @@ export function createMeetingRouter(
         return;
       }
       try {
-        rtmpTtsAudioTap.register(internalId, input.meetingId);
+        registerRtmpTtsTapIfRealtime(internalId, input.meetingId);
         await rtmpTtsSessionManager.start({
           meetingId: input.meetingId,
           rtmpUrl: rtmp
         });
-        rtmpTtsAudioTap.flushPending(input.meetingId, "publisher_spawned");
-        rtmpIngressSmokeLoop.start(input.meetingId, "publisher_spawned");
+        flushRtmpTtsTapIfRealtime(input.meetingId, "publisher_spawned");
+        startStagedVoiceForMeeting({
+          internalId,
+          numericMeetingId: input.meetingId,
+          stored,
+          controlWsHub: deps.controlWsHub,
+          runtimeEvents: deps.runtimeEvents
+        });
+        if (env.VOICE_MODE === "realtime") {
+          rtmpIngressSmokeLoop.start(input.meetingId, "publisher_spawned");
+        }
         const publisherSnapshot = rtmpTtsSessionManager.getSnapshot(input.meetingId);
         const receiverActive = false;
         const runtimeHealth = runtimeHealthFor({
@@ -599,7 +682,8 @@ export function createMeetingRouter(
           runtimeHealth
         });
       } catch (err: unknown) {
-        rtmpTtsAudioTap.unregister(internalId);
+        unregisterRtmpTtsTapIfRealtime(internalId);
+        stagedVoiceTurnRuntime.close(internalId);
         await rtmpSttBridge.stop(input.meetingId);
         orchestrator.stopMeeting(internalId, {
           reason: "manual_stop",
@@ -753,7 +837,8 @@ export function createMeetingRouter(
       payload: { numericMeetingId: input.meetingId, stopReason: input.stopReason }
     }).catch(() => undefined);
     rtmpIngressSmokeLoop.stop(input.meetingId, "meeting_stopped");
-    rtmpTtsAudioTap.unregister(internalId);
+    unregisterRtmpTtsTapIfRealtime(internalId);
+    stagedVoiceTurnRuntime.close(internalId);
     await rtmpTtsSessionManager.stop(input.meetingId);
     await rtmpSttBridge.stop(input.meetingId);
     deps.avatarRuntime?.stop(internalId, input.stopReason);
