@@ -34,7 +34,7 @@ const envSchema = z.object({
    * Voice dialogue pipeline: `realtime` = OpenAI Realtime speech-to-speech (legacy WebRTC);
    * `staged` = Speech-to-text → Responses → Text-to-speech on gateway.
    */
-  VOICE_MODE: z.enum(["realtime", "staged"]).default("staged"),
+  VOICE_MODE: z.enum(["realtime", "staged"]).default("realtime"),
   /** REST POST /audio/transcriptions model (staged STT leg). */
   OPENAI_STT_TRANSCRIPTION_MODEL: z.string().default("gpt-4o-mini-transcribe"),
   /** REST POST /v1/responses model (staged LLM leg). */

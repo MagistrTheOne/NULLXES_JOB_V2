@@ -20,7 +20,7 @@ Legacy `VOICE_MODE=realtime` keeps OpenAI Realtime WebRTC + `response.audio.delt
 
 | Variable | Default | Role |
 |----------|---------|------|
-| `VOICE_MODE` | `staged` | `realtime` \| `staged` |
+| `VOICE_MODE` | `realtime` | `realtime` \| `staged` |
 | `OPENAI_STT_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | STT leg |
 | `OPENAI_LLM_MODEL` | `gpt-4.1-mini` | Responses leg |
 | `OPENAI_TTS_MODEL` | `gpt-4o-mini-tts` | TTS leg |
